@@ -16,8 +16,8 @@
     "server:build": "npm --prefix server run build",
     "build:worker": "npm run server:install && npm run server:build && npx @opennextjs/cloudflare build",
     "dev:worker": "wrangler dev",
-    "preview": "npm run build:worker && wrangler dev",
-    "deploy": "npm run build:worker && wrangler deploy"
+    "preview": "npm run build:worker && npx @opennextjs/cloudflare preview",
+    "deploy": "npm run build:worker && npx @opennextjs/cloudflare deploy"
   },
   "dependencies": {
     "server-only": "^0.0.1",
