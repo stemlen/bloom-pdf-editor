@@ -73,7 +73,7 @@ Open an issue with the `feature request` label to discuss your idea before start
 ```bash
 # Install all dependencies
 npm install
-npm --prefix server install
+# postinstall runs `npm --prefix server ci` for engine deps
 
 # Start the development server
 npm run dev

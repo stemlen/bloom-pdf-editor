@@ -209,9 +209,8 @@ PDF bytes
 git clone https://github.com/stemlen/bloom-pdf-editor.git
 cd bloom-pdf-editor
 
-# Install dependencies
+# Install dependencies (also installs server engine deps via postinstall)
 npm install
-npm --prefix server install   # Server engine dependencies (one-time)
 
 # Start development server
 npm run dev                   # Builds engine → starts Next.js
