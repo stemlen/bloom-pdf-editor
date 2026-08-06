@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
+    "postinstall": "npm run server:install",
+    "server:install": "npm --prefix server ci --include=dev",
     "dev": "npm run server:build && next dev --webpack",
-    "build": "npm run server:build && next build",
+    "build:next": "npm run server:install && npm run server:build && next build",
+    "build:worker": "npx @opennextjs/cloudflare build --skipNextBuild",
+    "build": "npm run build:next && npm run build:worker",
     "start": "next start",
     "lint": "eslint",
     "test": "vitest run",
@@ -12,10 +16,9 @@
     "server:dev": "npm --prefix server run dev",
     "server:test": "npm --prefix server test",
     "server:build": "npm --prefix server run build",
-    "build:worker": "npm run server:build && npx @opennextjs/cloudflare build",
     "dev:worker": "wrangler dev",
-    "preview": "npm run build:worker && wrangler dev",
-    "deploy": "npm run build:worker && wrangler deploy"
+    "preview": "npm run build && npx @opennextjs/cloudflare preview",
+    "deploy": "npm run build && npx @opennextjs/cloudflare deploy"
   },
   "dependencies": {
     "server-only": "^0.0.1",
