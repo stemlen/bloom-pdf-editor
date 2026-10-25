@@ -391,7 +391,11 @@ export interface ISecureOptimizer {
 
 export interface ISecurityPolicyEngine {
   listPolicies(): string[];
-  applyPolicy(doc: PDFDocumentData, name: string): Promise<PDFDocumentData>;
+  applyPolicy(
+    doc: PDFDocumentData,
+    name: string,
+    passwordOverrides?: { userPassword?: string; ownerPassword?: string },
+  ): Promise<{ doc: PDFDocumentData; ownerPassword?: string; generatedOwnerPassword: boolean }>;
 }
 
 export interface ISecurityInspector {

@@ -154,6 +154,29 @@ describe('Phase 15 — Policy Engine', () => {
     expect(securityEngine.javascript.analyze(doc).hasJavaScript).toBe(false);
     expect(Object.keys(securityEngine.metadata.readInfo(doc)).length).toBe(0);
   });
+
+  it('refuses Confidential without an open password', async () => {
+    const doc = makeDoc({});
+    await expect(securityEngine.policy.applyPolicy(doc, 'Confidential')).rejects.toThrow(/open password/);
+  });
+
+  it('generates a strong, unique owner password instead of a built-in one', async () => {
+    const a = await securityEngine.policy.applyPolicy(makeDoc({}), 'Read Only');
+    const b = await securityEngine.policy.applyPolicy(makeDoc({}), 'Read Only');
+    expect(a.generatedOwnerPassword).toBe(true);
+    expect(a.ownerPassword).toHaveLength(20);
+    expect(a.ownerPassword).not.toBe(b.ownerPassword);
+    expect(a.ownerPassword).not.toBe('owner');
+  });
+
+  it('uses the supplied owner password', async () => {
+    const r = await securityEngine.policy.applyPolicy(makeDoc({}), 'Confidential', {
+      userPassword: 'open-me',
+      ownerPassword: 'my-owner-pw',
+    });
+    expect(r.generatedOwnerPassword).toBe(false);
+    expect(r.ownerPassword).toBe('my-owner-pw');
+  });
 });
 
 describe('Phase 16 — Enterprise', () => {

@@ -13,8 +13,11 @@ import {
   CheckCircle2,
   Loader2,
   PanelLeftClose,
+  Copy,
+  Check,
 } from 'lucide-react';
 import type { PDFDocumentData, FullSecurityReport } from '@/engine';
+import { generateStrongPassword } from '@/engine/security/password/generate';
 
 interface SecurityPanelProps {
   doc: PDFDocumentData | null;
@@ -42,6 +45,19 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
   const [allowModify, setAllowModify] = useState(false);
   const [policyName, setPolicyName] = useState('Confidential');
   const [policies, setPolicies] = useState<string[]>([]);
+  const [generatedPassword, setGeneratedPassword] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const copyGenerated = useCallback(async () => {
+    if (!generatedPassword) return;
+    try {
+      await navigator.clipboard.writeText(generatedPassword);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopied(false);
+    }
+  }, [generatedPassword]);
 
   const refresh = useCallback(async () => {
     if (!doc || !engine) return;
@@ -205,7 +221,7 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
               value={ownerPassword}
               onChange={(e) => setOwnerPassword(e.target.value)}
               className="w-full rounded-lg border border-app bg-panel-elevated px-3 py-2 text-app outline-none focus:border-primary"
-              placeholder="Required for permissions"
+              placeholder="Leave blank to generate a strong one"
             />
             <label className="block text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Algorithm</label>
             <select
@@ -228,9 +244,10 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
               type="button"
               disabled={busy || engine.securityEngine.isEncrypted(doc)}
               onClick={() => run(async () => {
+                const owner = ownerPassword || generateStrongPassword();
                 await engine.securityEngine.encrypt(doc, {
                   userPassword,
-                  ownerPassword: ownerPassword || userPassword || 'owner',
+                  ownerPassword: owner,
                   algorithm,
                   permissions: {
                     print: allowPrint,
@@ -243,6 +260,7 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
                     assemble: allowModify,
                   },
                 });
+                setGeneratedPassword(ownerPassword ? null : owner);
                 return 'Document encrypted';
               })}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-primary hover:brightness-105 disabled:opacity-50 py-2.5 text-primary-foreground font-bold shadow-[0_6px_20px_-6px_rgba(232,96,122,0.6)]"
@@ -345,26 +363,71 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
             <p className="text-app-faint leading-relaxed">
               {engine.securityEngine.policy.getPolicy(policyName)?.description}
             </p>
-            <p className="text-[10px] text-app-faint leading-relaxed">
-              Policies that encrypt use built-in sample passwords — set your own via Protect tab for production use.
-            </p>
+            {engine.securityEngine.policy.getPolicy(policyName)?.requireEncryption && (
+              <>
+                <label className="block text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">
+                  Open password{engine.securityEngine.policy.getPolicy(policyName)?.requireUserPassword ? '' : ' (optional)'}
+                </label>
+                <input
+                  type="password"
+                  value={userPassword}
+                  onChange={(e) => setUserPassword(e.target.value)}
+                  className="w-full rounded-lg border border-app bg-panel-elevated px-3 py-2 text-app outline-none focus:border-primary"
+                  placeholder="Needed to open the PDF"
+                />
+                <label className="block text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Owner password</label>
+                <input
+                  type="password"
+                  value={ownerPassword}
+                  onChange={(e) => setOwnerPassword(e.target.value)}
+                  className="w-full rounded-lg border border-app bg-panel-elevated px-3 py-2 text-app outline-none focus:border-primary"
+                  placeholder="Leave blank to generate a strong one"
+                />
+              </>
+            )}
             <button
               type="button"
-              disabled={busy}
+              disabled={busy || (!!engine.securityEngine.policy.getPolicy(policyName)?.requireUserPassword && !userPassword)}
               onClick={() => run(async () => {
-                await engine.securityEngine.policy.applyPolicy(doc, policyName, {
+                const result = await engine.securityEngine.policy.applyPolicy(doc, policyName, {
                   userPassword: userPassword || undefined,
                   ownerPassword: ownerPassword || undefined,
                 });
+                setGeneratedPassword(result.generatedOwnerPassword ? result.ownerPassword ?? null : null);
                 return `Applied policy: ${policyName}`;
               })}
-              className="w-full flex items-center justify-center gap-2 rounded-lg bg-primary hover:brightness-105 py-2.5 text-primary-foreground font-bold shadow-[0_6px_20px_-6px_rgba(232,96,122,0.6)]"
+              className="w-full flex items-center justify-center gap-2 rounded-lg bg-primary hover:brightness-105 disabled:opacity-50 py-2.5 text-primary-foreground font-bold shadow-[0_6px_20px_-6px_rgba(232,96,122,0.6)]"
             >
               <ScrollText size={14} /> Apply policy
             </button>
           </>
         )}
 
+        {generatedPassword && (
+          <div role="alert" className="space-y-2 rounded-lg border-2 border-amber-500/60 bg-amber-500/10 p-3">
+            <div className="flex gap-2 font-bold text-amber-700 dark:text-amber-400">
+              <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+              <span>Save this owner password now</span>
+            </div>
+            <p className="text-app leading-relaxed">
+              It was generated for you and is not stored anywhere. Without it, you can’t change this PDF’s permissions or remove its protection.
+            </p>
+            <div className="flex items-center gap-2">
+              <code data-testid="generated-owner-password" className="flex-1 select-all break-all rounded-md border border-app bg-panel-elevated px-2 py-1.5 font-mono text-app">
+                {generatedPassword}
+              </code>
+              <button
+                type="button"
+                onClick={copyGenerated}
+                aria-label="Copy owner password"
+                className="flex items-center gap-1 rounded-md border border-app bg-panel-elevated px-2 py-1.5 font-semibold text-app hover:border-primary"
+              >
+                {copied ? <Check size={12} /> : <Copy size={12} />}
+                {copied ? 'Copied' : 'Copy'}
+              </button>
+            </div>
+          </div>
+        )}
         {message && (
           <div className="flex gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/10 p-2 text-emerald-500 font-medium">
             <CheckCircle2 size={14} className="shrink-0 mt-0.5" />
