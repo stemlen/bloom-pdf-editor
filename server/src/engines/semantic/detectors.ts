@@ -311,14 +311,15 @@ export function detectHeading(ctx: BlockContext): SemanticHeading | null {
   if (!text || text.length > 200) return null;
   // Table column header rows / field labels — not section headings
   if (isTableHeaderRow(text)) return null;
-  // "Technical Skills: …" / "Personal Achievements:" are labels, not headings
-  if (/^[A-Z][^:\n]{1,40}:/.test(text.trim())) return null;
 
   const fontSize =
     ctx.styleProfile?.features.fontSize ??
     ('runs' in ctx.block ? ctx.block.runs[0]?.fontSize : undefined) ??
     12;
-  const bold = ctx.styleProfile?.features.bold ?? false;
+  const firstRun = 'runs' in ctx.block ? ctx.block.runs.find((r) => r.text.trim()) : undefined;
+  const bold =
+    ctx.styleProfile?.features.bold ??
+    (firstRun?.bold === true || (firstRun?.fontWeight ?? 400) >= 600);
   const alignment = ctx.styleProfile?.features.alignment ?? ctx.block.alignment ?? 'left';
 
   // Title: large, near top, short
@@ -328,6 +329,9 @@ export function detectHeading(ctx: BlockContext): SemanticHeading | null {
       : 1;
 
   const sizeRatio = fontSize / Math.max(ctx.bodyMedianFontSize, 1);
+  // "Technical Skills: …" / "Personal Achievements:" are labels, not headings,
+  // unless set clearly larger than body text ("Chapter 1: Introduction").
+  if (/^[A-Z][^:\n]{1,40}:/.test(text.trim()) && sizeRatio < 1.25) return null;
 
   if (
     (ctx.block.type === 'title' || (sizeRatio >= 1.6 && topBand <= 0.25 && text.length < 120)) &&
@@ -830,12 +834,51 @@ function ctxFromLineSlices(
       !(joinedText.length <= 40 && joinedText === joinedText.toUpperCase())
         ? 'left'
         : ctx.block.alignment,
+    bbox: unionRunBounds(slices.flatMap((s) => s.runs)) ?? ctx.block.bbox,
     runs,
   } as Block;
-  return { ...ctx, block };
+  // The block's style profile describes its first line; a line split out of a
+  // mixed block (heading + body) must be judged by its own runs.
+  const own = runs.find((r) => r.text.trim() && r.fontSize);
+  const first = 'runs' in ctx.block ? ctx.block.runs.find((r) => r.text.trim() && r.fontSize) : undefined;
+  const sameStyle = own && first && own.fontSize === first.fontSize && own.fontName === first.fontName;
+  return { ...ctx, block, styleProfile: sameStyle ? ctx.styleProfile : undefined };
+}
+
+/** Bounds of the given runs, so a line split from a page-sized block keeps its own position. */
+function unionRunBounds(runs: Run[]): Block['bbox'] | undefined {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const r of runs) {
+    const b = r.bbox;
+    if (!b || r.text === '\n' || !(b.width > 0 || b.height > 0)) continue;
+    minX = Math.min(minX, b.x);
+    minY = Math.min(minY, b.y);
+    maxX = Math.max(maxX, b.x + b.width);
+    maxY = Math.max(maxY, b.y + b.height);
+  }
+  if (!Number.isFinite(minX)) return undefined;
+  return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
 }
 
 export function bodyMedianFontSize(idm: IntermediateDocument, analysis: TypographyAnalysis): number {
+  // Body size is the size most of the text is set in, weighted by length;
+  // the typography profiles sample one style per block and over-count headings.
+  const weight = new Map<number, number>();
+  for (const page of idm.sections.flatMap((s) => s.pages)) {
+    for (const b of page.blocks) {
+      if (!('runs' in b)) continue;
+      for (const r of b.runs) {
+        if (!r.fontSize || !r.text.trim()) continue;
+        weight.set(r.fontSize, (weight.get(r.fontSize) ?? 0) + r.text.trim().length);
+      }
+    }
+  }
+  if (weight.size > 1) {
+    return [...weight.entries()].sort((a, b) => b[1] - a[1])[0]![0];
+  }
   const sizes = analysis.statistics.dominantFontSizes;
   if (sizes[0]) return sizes[0].size;
   const samples: number[] = [];
