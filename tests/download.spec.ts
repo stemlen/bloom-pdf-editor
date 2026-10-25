@@ -24,7 +24,7 @@ test("compressed download shrinks the photo", async ({ page }) => {
   const original = (await downloadPdf(page)).bytes.length;
   await page.getByTitle("Download options").click();
   await page.getByRole("button", { name: /Screen/ }).click();
-  await page.getByRole("button", { name: /Extreme/ }).click();
+  await page.getByRole("button", { name: /Strongest/ }).click();
   const { name, bytes } = await download(page, page.getByRole("button", { name: /^Download \(20% · 72 DPI\)/ }));
   expect(magic(bytes)).toBe("pdf");
   expect((await pdfDoc(bytes)).getPageCount()).toBe(3);

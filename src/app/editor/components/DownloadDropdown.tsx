@@ -1,6 +1,7 @@
 'use client';
 
-import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Download,
   ChevronDown,
@@ -44,15 +45,32 @@ const DPI_PRESETS = [
   { value: 72, label: 'Screen', desc: '72 DPI — Smallest file' },
   { value: 150, label: 'Standard', desc: '150 DPI — Good balance' },
   { value: 300, label: 'Print', desc: '300 DPI — Print quality' },
-  { value: 600, label: 'High', desc: '600 DPI — Maximum detail' },
+  { value: 600, label: 'Maximum', desc: '600 DPI — Maximum detail' },
 ];
 
 const COMPRESSION_PRESETS = [
-  { value: 20, label: 'Extreme', desc: 'Smallest file' },
-  { value: 50, label: 'High', desc: 'Good balance' },
-  { value: 75, label: 'Medium', desc: 'Better quality' },
-  { value: 100, label: 'Low', desc: 'Highest quality' },
+  { value: 20, label: 'Strongest', desc: 'Smallest file (20% image quality)' },
+  { value: 50, label: 'Strong', desc: 'Good balance (50% image quality)' },
+  { value: 75, label: 'Light', desc: 'Better quality (75% image quality)' },
+  { value: 100, label: 'Minimal', desc: 'Highest quality (100% image quality)' },
 ];
+
+const MOBILE_QUERY = '(max-width: 767px)';
+
+function subscribeMobile(onChange: () => void): () => void {
+  const mql = window.matchMedia(MOBILE_QUERY);
+  mql.addEventListener('change', onChange);
+  return () => mql.removeEventListener('change', onChange);
+}
+
+/** True below the md breakpoint, where the menu becomes a bottom sheet. */
+function useIsMobile(): boolean {
+  return useSyncExternalStore(
+    subscribeMobile,
+    () => window.matchMedia(MOBILE_QUERY).matches,
+    () => false,
+  );
+}
 
 // ─── Component ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +86,8 @@ export function DownloadDropdown({
   const [selectedDpi, setSelectedDpi] = useState(150);
   const [compressionQuality, setCompressionQuality] = useState(75);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const isMobile = useIsMobile();
 
   const sizeEstimation = useMemo<SizeEstimation | null>(
     () => (isOpen && doc ? estimateDocumentSize(doc) : null),
@@ -77,9 +97,9 @@ export function DownloadDropdown({
   useEffect(() => {
     if (!isOpen) return;
     const handler = (e: MouseEvent) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
-        setIsOpen(false);
-      }
+      const target = e.target as Node;
+      if (dropdownRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setIsOpen(false);
     };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
@@ -141,8 +161,12 @@ export function DownloadDropdown({
         </button>
       </div>
 
-      {isOpen && (
+      {isOpen && (() => {
+        // On narrow screens the toolbar clips fixed children (it creates a
+        // containing block), so the bottom sheet is rendered into <body>.
+        const menu = (
         <div
+          ref={menuRef}
           className="fixed inset-x-0 bottom-0 md:absolute md:inset-auto md:right-0 md:top-full md:mt-2 w-full md:w-[380px] bg-popover border border-border md:rounded-2xl rounded-t-2xl shadow-[0_12px_32px_-8px_rgba(0,0,0,0.22)] animate-scale-in md:origin-top-right overflow-hidden z-50 text-app max-h-[80vh] md:max-h-none overflow-y-auto"
           style={{ animation: 'dropdownIn 0.25s cubic-bezier(0.16, 1, 0.3, 1)' }}
         >
@@ -291,7 +315,9 @@ export function DownloadDropdown({
             </button>
           </div>
         </div>
-      )}
+        );
+        return isMobile ? createPortal(menu, document.body) : menu;
+      })()}
 
       <style>{`
         @keyframes dropdownIn {
