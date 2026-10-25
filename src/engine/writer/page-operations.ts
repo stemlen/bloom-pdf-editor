@@ -154,8 +154,15 @@ export function rotatePageBy(doc: PDFDocumentData, pageIndex: number, degrees: n
 export function insertBlankPage(
   doc: PDFDocumentData,
   atIndex: number,
-  size: PDFRectangle = { x: 0, y: 0, width: 612, height: 792 }, // US Letter
+  size?: PDFRectangle,
 ): void {
+  // Match the neighbouring page (the one before, else the one after), so a
+  // blank page in an A4 document is A4; US Letter only for an empty document.
+  if (!size) {
+    const neighbour = doc.pages[atIndex - 1] ?? doc.pages[atIndex];
+    const box = neighbour?.mediaBox;
+    size = box ? { x: 0, y: 0, width: box.width, height: box.height } : { x: 0, y: 0, width: 612, height: 792 };
+  }
   const nextObj = getNextObjNum(doc);
 
   // Create page dictionary
