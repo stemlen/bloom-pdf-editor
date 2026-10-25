@@ -43,13 +43,26 @@ export class SvgExporter {
       }
 
       for (const n of Object.values(udm.semantic.nodes)) {
-        if (n.pageIndex !== pi || !n.bbox || n.type === 'list_item') continue;
+        if (n.pageIndex !== pi || !n.bbox || n.type === 'list_item' || n.type === 'table') continue;
         if (!('text' in n) || !n.text) continue;
-        const fs = n.type === 'heading' || n.type === 'title' ? 16 : 12;
-        const y = flipY(n.bbox.y, n.bbox.height, height) + fs;
+        const heading = n.type === 'heading' || n.type === 'title' || n.type === 'subtitle';
+        const runSize =
+          'runs' in n && Array.isArray(n.runs) ? n.runs.find((r) => r.fontSize)?.fontSize : undefined;
+        const fs = runSize ?? (heading ? 16 : 12);
         parts.push(
-          `<text x="${n.bbox.x}" y="${y}" font-size="${fs}" font-family="Helvetica,Arial,sans-serif">${escXml(String(n.text).slice(0, 200))}</text>`,
+          textElement(String(n.text), n.bbox, fs, height, heading ? ' font-weight="bold"' : ''),
         );
+      }
+
+      // Table cells are placed in their own cells rather than as one line.
+      for (const t of udm.tables) {
+        if (t.pageIndex !== pi) continue;
+        for (const c of t.cells) {
+          if (!c.text.trim()) continue;
+          const fs = c.runs.find((r) => r.fontSize)?.fontSize ?? 10;
+          const box = { ...c.bbox, x: c.bbox.x + 3, width: Math.max(c.bbox.width - 6, fs) };
+          parts.push(textElement(c.text, box, fs, height, ''));
+        }
       }
       parts.push('</g>');
     });
@@ -66,6 +79,49 @@ ${parts.join('\n')}
       filename: `${sanitizeFilename(udm.metadata.title ?? 'document', 'document')}.svg`,
     };
   }
+}
+
+/**
+ * A `<text>` for a block: one `<tspan>` per wrapped line inside the block's
+ * box, so multi-line paragraphs do not run off the page or overlap.
+ */
+function textElement(
+  text: string,
+  bbox: { x: number; y: number; width: number; height: number },
+  fontSize: number,
+  pageHeight: number,
+  extra: string,
+): string {
+  const top = flipY(bbox.y, bbox.height, pageHeight);
+  // Helvetica averages about half an em per character.
+  const perLine = Math.max(1, Math.floor(bbox.width / (fontSize * 0.5)));
+  const lines = wrapWords(text, perLine);
+  const leading = lines.length > 1 ? Math.max(fontSize * 1.15, bbox.height / lines.length) : fontSize;
+  const first = top + fontSize * 0.8;
+  const spans = lines
+    .map((line, i) => `<tspan x="${num(bbox.x)}" y="${num(first + i * leading)}">${escXml(line)}</tspan>`)
+    .join('');
+  return `<text font-size="${num(fontSize)}" font-family="Helvetica,Arial,sans-serif"${extra}>${spans}</text>`;
+}
+
+function wrapWords(text: string, perLine: number): string[] {
+  const lines: string[] = [];
+  let cur = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (cur && cur.length + 1 + word.length > perLine) {
+      lines.push(cur);
+      cur = word;
+    } else {
+      cur = cur ? `${cur} ${word}` : word;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines.length > 0 ? lines : [''];
+}
+
+/** Round to hundredths so coordinates do not carry float noise. */
+function num(v: number): string {
+  return String(Math.round(v * 100) / 100);
 }
 
 /** PDF y (bottom-up) → SVG y (top-down). */
