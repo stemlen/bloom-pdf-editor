@@ -5358,6 +5358,13 @@ export default function EditorPage() {
   // ── Keyboard shortcuts (global — NOT during editing) ──
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // Zoom works everywhere, including while a line or text box is being edited (BE-111).
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_')) {
+        e.preventDefault();
+        if (e.key === '-' || e.key === '_') zoomOut();
+        else zoomIn();
+        return;
+      }
       // Don't intercept when the hidden input has focus (editing)
       if (editingLine) return;
 
