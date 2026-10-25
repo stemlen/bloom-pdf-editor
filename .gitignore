@@ -23,6 +23,10 @@
 # misc
 .DS_Store
 *.pem
+# Throwaway, self-signed test-only keys (CN=Bloom Test Signer). Never use them
+# for real signing; they exist so the signature tests run on a clean checkout.
+!src/engine/__tests__/signatures/fixtures/*.pem
+!tests/fixtures/signer.pem
 
 # debug
 npm-debug.log*
