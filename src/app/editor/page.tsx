@@ -4490,9 +4490,29 @@ export default function EditorPage() {
     const viewport = scrollViewportRef.current;
     if (!viewport) return;
 
+    let lastPageFlip = 0;
     const onWheel = (e: WheelEvent) => {
-      // Pinch-to-zoom on macOS/Chrome sets ctrlKey; also support Ctrl/Cmd+wheel
-      if (!(e.ctrlKey || e.metaKey)) return;
+      // Plain wheel at the top or bottom edge of a page moves to the
+      // neighbouring page (one page is shown at a time), throttled so one
+      // flick doesn't skip several pages.
+      if (!(e.ctrlKey || e.metaKey)) {
+        const now = Date.now();
+        if (now - lastPageFlip < 450 || Math.abs(e.deltaY) < 4) return;
+        const atBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
+        const atTop = viewport.scrollTop <= 1;
+        if (e.deltaY > 0 && atBottom && currentPage < totalPages - 1) {
+          lastPageFlip = now;
+          e.preventDefault();
+          void goToNext().then(() => { viewport.scrollTop = 0; });
+        } else if (e.deltaY < 0 && atTop && currentPage > 0) {
+          lastPageFlip = now;
+          e.preventDefault();
+          void goToPrev().then(() => {
+            requestAnimationFrame(() => { viewport.scrollTop = viewport.scrollHeight; });
+          });
+        }
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
 
@@ -4507,7 +4527,7 @@ export default function EditorPage() {
 
     viewport.addEventListener('wheel', onWheel, { passive: false });
     return () => viewport.removeEventListener('wheel', onWheel);
-  }, [doc, isLoading, currentPage]);
+  }, [doc, isLoading, currentPage, totalPages, goToNext, goToPrev]);
   // ── Watermark Handlers ──
   const handleWatermarkImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
