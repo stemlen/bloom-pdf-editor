@@ -2254,11 +2254,15 @@ export default function EditorPage() {
         field = unsigned;
       } else {
         const placedSig = signaturesRef.current.find((s) => s.pageIndex === currentPage) ?? signaturesRef.current[0];
-        const px = placedSig ? placedSig.x : 100;
-        const py = placedSig ? placedSig.y : 100;
+        // createSignatureFieldAtPoint centres the field on the point, and a
+        // placed signature's x/y is its bottom-left corner, so pass its centre
+        // and size to make the field cover the image exactly (BE-511).
+        const px = placedSig ? placedSig.x + placedSig.width / 2 : 100;
+        const py = placedSig ? placedSig.y + placedSig.height / 2 : 100;
         try {
           const created = createSignatureFieldAtPoint(doc, currentPage, px, py, {
             withPlaceholderAppearance: true,
+            ...(placedSig ? { width: placedSig.width, height: placedSig.height } : {}),
           });
           const fieldsOnPage = detectSignatureFieldsOnPage(doc, currentPage);
           setPdfSignatureFields(fieldsOnPage);
