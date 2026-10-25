@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   Download,
   ChevronDown,
@@ -67,14 +67,12 @@ export function DownloadDropdown({
   const [isOpen, setIsOpen] = useState(false);
   const [selectedDpi, setSelectedDpi] = useState(150);
   const [compressionQuality, setCompressionQuality] = useState(75);
-  const [sizeEstimation, setSizeEstimation] = useState<SizeEstimation | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (isOpen && doc) {
-      setSizeEstimation(estimateDocumentSize(doc));
-    }
-  }, [isOpen, doc]);
+  const sizeEstimation = useMemo<SizeEstimation | null>(
+    () => (isOpen && doc ? estimateDocumentSize(doc) : null),
+    [isOpen, doc],
+  );
 
   useEffect(() => {
     if (!isOpen) return;

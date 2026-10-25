@@ -290,7 +290,7 @@ export async function renderPageToCanvas(
           if (!mappedToRect) {
             const streamMatrix = nStream.dict.get('Matrix');
             if (streamMatrix instanceof PDFArray && streamMatrix.items.length === 6) {
-              const m = streamMatrix.items.map((e: any) => (e as PDFNumber).value);
+              const m = streamMatrix.items.map((e) => (e as PDFNumber).value);
               ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
             } else if (rectObj instanceof PDFArray && rectObj.items.length >= 4) {
               const x = (rectObj.items[0] as PDFNumber).value;

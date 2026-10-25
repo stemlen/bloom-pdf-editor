@@ -218,7 +218,7 @@ export function buildSignatureAppearanceContent(
     lines.push(`${fmt(textColor[0])} ${fmt(textColor[1])} ${fmt(textColor[2])} rg`);
     lines.push('BT');
     lines.push(`/${fontName} ${fmt(fontSize)} Tf`);
-    let y = Math.min(cursorY, h - pad - fontSize);
+    const y = Math.min(cursorY, h - pad - fontSize);
     for (let i = 0; i < meta.length; i++) {
       if (i === 0) {
         lines.push(`${fmt(pad)} ${fmt(y)} Td`);
@@ -247,7 +247,7 @@ export function serializeAppearanceStream(
   const matrix = options?.matrix ?? ([1, 0, 0, 1, 0, 0] as [
     number, number, number, number, number, number,
   ]);
-  let bytes = new TextEncoder().encode(content);
+  const bytes = new TextEncoder().encode(content);
   const dict = new PDFDict();
   dict.set('Type', new PDFName('XObject'));
   dict.set('Subtype', new PDFName('Form'));

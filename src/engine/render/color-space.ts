@@ -304,9 +304,9 @@ function parseLab(arr: PDFArray, objects: Map<string, PDFObject>): ColorSpace {
       const b = (c[2] ?? 0) * 255 - 128;
 
       // Lab → XYZ (D65 white point)
-      let fy = (L + 16) / 116;
-      let fx = a / 500 + fy;
-      let fz = fy - b / 200;
+      const fy = (L + 16) / 116;
+      const fx = a / 500 + fy;
+      const fz = fy - b / 200;
 
       const xn = 0.9505, yn = 1.0, zn = 1.0890;
       const delta = 6 / 29;
@@ -320,9 +320,9 @@ function parseLab(arr: PDFArray, objects: Map<string, PDFObject>): ColorSpace {
       const Z = zn * fInv(fz);
 
       // XYZ → sRGB
-      let r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z;
-      let g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
-      let bVal = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
+      const r = 3.2406 * X - 1.5372 * Y - 0.4986 * Z;
+      const g = -0.9689 * X + 1.8758 * Y + 0.0415 * Z;
+      const bVal = 0.0557 * X - 0.2040 * Y + 1.0570 * Z;
 
       // Gamma correction
       function gammaCorrect(v: number): number {

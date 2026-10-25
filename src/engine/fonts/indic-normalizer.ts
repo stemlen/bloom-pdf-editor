@@ -568,7 +568,7 @@ export function repairIndicRuns<T extends IndicRunItem>(runs: T[]): void {
 
     if (!hasIndic) continue;
 
-    run.glyphs = reorderIndicGlyphs(run.glyphs as any) as any;
+    run.glyphs = reorderIndicGlyphs(run.glyphs);
     run.text = normalizeIndicText(run.glyphs.map(g => g.unicode).join(''));
   }
 }

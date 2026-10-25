@@ -65,13 +65,24 @@ export function SignatureCreateDialog({ open, onOpenChange, onSave }: SignatureC
     engineRef.current.paint(ctx);
   }, []);
 
+  // Reset transient state each time the dialog opens (during render, not in an effect).
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setUploadPreview(null);
+      setUploadDims(null);
+      setError(null);
+    }
+  }
+
   useEffect(() => {
     if (!open) return;
     engineRef.current = new SignatureDrawEngine({ color: drawColor, width: drawWidth });
-    setUploadPreview(null);
-    setUploadDims(null);
-    setError(null);
     requestAnimationFrame(redraw);
+    // A fresh drawing engine is wanted only when the dialog opens; colour and
+    // width changes are applied by the setStyle effect below.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, redraw]);
 
   useEffect(() => {

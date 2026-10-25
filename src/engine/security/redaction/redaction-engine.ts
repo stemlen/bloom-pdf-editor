@@ -164,7 +164,7 @@ export class RedactionEngine implements IRedactionEngine {
     let pagesProcessed = 0;
     let textOperatorsRemoved = 0;
     let imageOperatorsRemoved = 0;
-    let pathOperatorsRemoved = 0;
+    const pathOperatorsRemoved = 0;
     let annotationsRemoved = 0;
     let formFieldsRemoved = 0;
 

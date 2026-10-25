@@ -1,4 +1,4 @@
-import React, { MutableRefObject, useState } from 'react';
+import React, { MutableRefObject, useEffect, useState } from 'react';
 import {
   Type, TextCursorInput, Image, PenTool, Highlighter, Eraser, MousePointer2,
   X, Trash2, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, Minus, Plus, Stamp, Link2,
@@ -6,7 +6,7 @@ import {
   ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles,
 } from 'lucide-react';
 import type { DrawMode, EditorTool, RemovedImageRecord } from '../types';
-import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry } from '@/engine';
+import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry, WatermarkPosition } from '@/engine';
 
 interface PropertiesSidebarProps {
   onClose?: () => void;
@@ -96,8 +96,8 @@ interface PropertiesSidebarProps {
   setWatermarkRotation?: (v: number) => void;
   watermarkSize?: number;
   setWatermarkSize?: (v: number) => void;
-  watermarkPosition?: string;
-  setWatermarkPosition?: (v: string) => void;
+  watermarkPosition?: WatermarkPosition;
+  setWatermarkPosition?: (v: WatermarkPosition) => void;
   watermarkMosaic?: boolean;
   setWatermarkMosaic?: (v: boolean) => void;
   watermarkPageFrom?: number;
@@ -239,6 +239,14 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
   const [previewImage, setPreviewImage] = useState<RemovedImageRecord | null>(null);
   const [isRemovedImagesOpen, setIsRemovedImagesOpen] = useState(true);
 
+  // Clock for relative timestamps ("5m ago"); ticks once a minute so the
+  // render itself stays pure.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
   if (!['text', 'addtext', 'draw', 'highlight', 'erase', 'select', 'watermark', 'sign'].includes(activeTool)) return null;
 
   const FONT_FAMILIES = [
@@ -276,9 +284,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
 
   const isMobile = props.isMobile ?? false;
 
-
   const formatRelativeTime = (timestamp: number): string => {
-    const diff = Date.now() - timestamp;
+    const diff = Math.max(0, now - timestamp);
     if (diff < 60_000) return 'Just now';
     const mins = Math.floor(diff / 60_000);
     if (mins < 60) return `${mins}m ago`;
@@ -1269,7 +1276,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                   <label className="text-[11px] font-medium text-app">Shape:</label>
                   <select
                     value={watermarkShapeType}
-                    onChange={(e) => setWatermarkShapeType?.(e.target.value as any)}
+                    onChange={(e) => setWatermarkShapeType?.(e.target.value as 'rectangle' | 'circle' | 'pill')}
                     className="w-full bg-panel-elevated border border-app rounded px-3 py-2 text-xs text-app outline-none focus:border-primary transition-colors appearance-none cursor-pointer"
                   >
                     <option value="rectangle">Rectangle</option>
@@ -1320,7 +1327,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                       const fileInput = document.createElement('input');
                       fileInput.type = 'file';
                       fileInput.accept = 'image/png, image/jpeg';
-                      fileInput.onchange = (e) => onWatermarkImageUpload?.(e as any);
+                      fileInput.onchange = (e) =>
+                        onWatermarkImageUpload?.(e as unknown as React.ChangeEvent<HTMLInputElement>);
                       fileInput.click();
                     }}
                     className="flex items-center gap-2 bg-primary hover:brightness-105 text-primary-foreground px-8 py-3 rounded-xl text-xs font-bold transition-all"

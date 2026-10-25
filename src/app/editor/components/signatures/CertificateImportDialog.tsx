@@ -43,11 +43,17 @@ export function CertificateImportDialog({
   useEffect(() => {
     refreshRef.current = refresh;
   }, [refresh]);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setError(null);
+      setPassword('');
+      setPemPaste('');
+    }
+  }
   useEffect(() => {
     if (!open) return;
-    setError(null);
-    setPassword('');
-    setPemPaste('');
     // Hydrate may be async on first open
     const t = window.setTimeout(() => refreshRef.current(), 50);
     return () => window.clearTimeout(t);

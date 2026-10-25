@@ -561,7 +561,7 @@ function listPageFonts(
 ): Array<{ key: string; baseFont: string }> {
   const out: Array<{ key: string; baseFont: string }> = [];
   const resourcesObj = page.dict.get('Resources');
-  let resources = resourcesObj instanceof PDFRef ? resolveRef(resourcesObj, objects) : resourcesObj;
+  const resources = resourcesObj instanceof PDFRef ? resolveRef(resourcesObj, objects) : resourcesObj;
   if (!(resources instanceof PDFDict)) return out;
   let fontDict = resources.get('Font');
   if (fontDict instanceof PDFRef) fontDict = resolveRef(fontDict, objects);

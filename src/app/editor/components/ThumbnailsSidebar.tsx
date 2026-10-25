@@ -135,25 +135,20 @@ export function ThumbnailsSidebar({
     onReorderPages?.(from, toIndex);
   };
 
-  const InsertBar = ({
-    insertAt,
-    rotatePageIndex,
-  }: {
-    insertAt: number;
-    rotatePageIndex: number;
-  }) => (
+  // Plain render helper (not a component) so the bar isn't remounted on every render.
+  const renderInsertBar = (insertAt: number, rotatePageIndex: number) => (
     <div
       className={`group/bar relative flex justify-center z-20 ${isExpanded ? 'flex-col px-1 h-auto self-stretch' : 'py-1 w-full'}`}
       onDragOver={(e) => {
-        if (dragIndexRef.current == null) return;
+        if (dragIndex == null) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        setDropTarget(insertAt > (dragIndexRef.current ?? -1) ? insertAt - 1 : insertAt);
+        setDropTarget(insertAt > dragIndex ? insertAt - 1 : insertAt);
       }}
       onDrop={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        const from = dragIndexRef.current;
+        const from = dragIndex;
         if (from == null) return;
         const to = insertAt > from ? insertAt - 1 : insertAt;
         clearDrag();
@@ -306,7 +301,7 @@ export function ThumbnailsSidebar({
           </div>
 
           {!isGeneratingThumbnails && thumbnails.length > 0 && (
-            <InsertBar insertAt={0} rotatePageIndex={0} />
+            renderInsertBar(0, 0)
           )}
 
           {isGeneratingThumbnails && thumbnails.length === 0 ? (
@@ -434,7 +429,7 @@ export function ThumbnailsSidebar({
                     </div>
                   </div>
 
-                  <InsertBar insertAt={i + 1} rotatePageIndex={i} />
+                  {renderInsertBar(i + 1, i)}
                 </React.Fragment>
               );
             })

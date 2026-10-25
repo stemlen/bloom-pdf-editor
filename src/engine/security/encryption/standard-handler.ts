@@ -116,7 +116,7 @@ export function computeOValue(
     for (let i = 0; i < 50; i++) hash = md5(hash);
   }
   const ownerKey = hash.subarray(0, keyLen);
-  let userPad = padPassword(userPassword);
+  const userPad = padPassword(userPassword);
 
   if (revision === 2) {
     return rc4(ownerKey, userPad);
@@ -145,7 +145,7 @@ export function computeUValue(
   }
 
   // R3+: MD5(padding || ID) then RC4 with 20 iterations
-  let hash = md5(concatBytes(PASSWORD_PADDING, fileId.permanent));
+  const hash = md5(concatBytes(PASSWORD_PADDING, fileId.permanent));
   let data = hash; // 16 bytes
   for (let i = 0; i < 20; i++) {
     const iterKey = new Uint8Array(fileKey.length);

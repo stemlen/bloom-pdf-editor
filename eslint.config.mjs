@@ -12,6 +12,10 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Generated / vendored code that is not ours to lint:
+    // build output of the document engine and the minified pdf.js worker.
+    "server/dist/**",
+    "public/pdf.worker.min.mjs",
   ]),
 ]);
 

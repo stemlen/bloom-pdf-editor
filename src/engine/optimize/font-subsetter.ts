@@ -289,7 +289,7 @@ function scanContentForGlyphs(
   ttf: TTFFont,
 ): void {
   const fontTag = `/${fontInfo.resourceName}`;
-  let currentFont: string | null = null;
+  const currentFont: string | null = null;
 
   // Regex-based token scanner: find Tf, Tj, TJ, ', " operators
   // Tf: /FontName size Tf

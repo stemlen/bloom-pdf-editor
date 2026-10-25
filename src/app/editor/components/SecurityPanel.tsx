@@ -54,9 +54,24 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
     }
   }, [doc, engine]);
 
+  // Inspect whenever the document changes; ignore results for a stale document.
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    if (!doc || !engine) return;
+    let cancelled = false;
+    engine.securityEngine.inspector
+      .inspectFull(doc)
+      .then((full) => {
+        if (cancelled) return;
+        setReport(full);
+        setPolicies(engine.securityEngine.policy.listPolicies());
+      })
+      .catch((e: unknown) => {
+        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, engine]);
 
   const run = useCallback(async (fn: () => Promise<string>) => {
     if (!doc || !engine) return;

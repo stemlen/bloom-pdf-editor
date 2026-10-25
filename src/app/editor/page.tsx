@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   loadPdfFromStorage,
@@ -16,7 +16,7 @@ import { X, Loader2, ChevronLeft, Image, Type, Copy, RotateCw } from 'lucide-rea
 
 // We import types only — the engine modules are loaded dynamically
 // because they require browser APIs (canvas, DecompressionStream)
-import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, TextLine, ImageItem, PathItem, DisplayItem, TextWatermark, ImageWatermark, Watermark, DetectedWatermark, AcroFormWidget, BloomPage, DetectedTable, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry } from '@/engine';
+import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, TextLine, ImageItem, PathItem, DisplayItem, TextWatermark, ImageWatermark, Watermark, WatermarkPosition, DetectedWatermark, AcroFormWidget, BloomPage, DetectedTable, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry } from '@/engine';
 
 import type { EditorTool, ToolDef, PathType, DrawnPath, FloatingText, FloatingImage, DrawMode, RemovedImageRecord } from './types';
 import { TOOLS } from './types';
@@ -26,7 +26,7 @@ import {
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
 } from './utils';
-import { buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
+import { getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
 import { findMatchingFlowLine } from './flowLineMatch';
 
@@ -336,6 +336,12 @@ export default function EditorPage() {
   }, []);
   const initialRunTextRef = useRef<string>('');
   const editAnchorLineRef = useRef<TextLine | null>(null);
+  /** Render-safe mirror of editAnchorLineRef (refs must not be read during render). */
+  const [editAnchorLine, setEditAnchorLineState] = useState<TextLine | null>(null);
+  const setEditAnchorLine = useCallback((line: TextLine | null) => {
+    editAnchorLineRef.current = line;
+    setEditAnchorLineState(line);
+  }, []);
   /** Pending style patches queued while typing, each with a char range. */
   const pendingStylesRef = useRef<Array<{ patch: Partial<TextStyleUI>; start: number; end: number }>>([]);
   /** Word-like typing style: applies to newly typed chars when caret is collapsed. */
@@ -404,7 +410,6 @@ export default function EditorPage() {
   /** Removed / deleted images bin for instant restoration */
   const [removedImages, setRemovedImages] = useState<RemovedImageRecord[]>([]);
   const removedImagesRef = useRef<RemovedImageRecord[]>([]);
-  removedImagesRef.current = removedImages;
 
   const dragInfo = useRef<{ id: string; type: 'text' | 'image'; startX: number; startY: number; startPdfX: number; startPdfY: number } | null>(null);
 
@@ -436,17 +441,19 @@ export default function EditorPage() {
   const [watermarkOpacity, setWatermarkOpacity] = useState(50);
   const [watermarkRotation, setWatermarkRotation] = useState(45);
   const [watermarkSize, setWatermarkSize] = useState(50);
-  const [watermarkPosition, setWatermarkPosition] = useState('center');
+  const [watermarkPosition, setWatermarkPosition] = useState<WatermarkPosition>('center');
   const [watermarkMosaic, setWatermarkMosaic] = useState(false);
   const [watermarkLivePreview, setWatermarkLivePreview] = useState(true);
   const [showApplySuccessModal, setShowApplySuccessModal] = useState(false);
   const [watermarkPageFrom, setWatermarkPageFrom] = useState(1);
   const [watermarkPageTo, setWatermarkPageTo] = useState(1);
   // Watermark the whole document by default (the range follows the page count).
-  useEffect(() => {
+  const [watermarkRangeTotal, setWatermarkRangeTotal] = useState(totalPages);
+  if (watermarkRangeTotal !== totalPages) {
+    setWatermarkRangeTotal(totalPages);
     setWatermarkPageFrom(1);
     setWatermarkPageTo(Math.max(1, totalPages));
-  }, [totalPages]);
+  }
   const [watermarkLayer, setWatermarkLayer] = useState<'above' | 'below'>('above');
   const [watermarkColor, setWatermarkColor] = useState('#000000');
   const [watermarkImageFile, setWatermarkImageFile] = useState<File | null>(null);
@@ -479,11 +486,8 @@ export default function EditorPage() {
   const undoSnapshotRef = useRef<{ pageIndex: number; contentBytes: Uint8Array } | null>(null);
 
   const drawnPathsRef = useRef<DrawnPath[]>([]);
-  drawnPathsRef.current = drawnPaths;
   const floatingTextsRef = useRef<FloatingText[]>([]);
-  floatingTextsRef.current = floatingTexts;
   const floatingImagesRef = useRef<FloatingImage[]>([]);
-  floatingImagesRef.current = floatingImages;
   const signaturesRef = useRef<VisualSignature[]>([]);
   const committingPromiseRef = useRef<Promise<void> | null>(null);
 
@@ -515,7 +519,6 @@ export default function EditorPage() {
   const [findText, setFindText] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
-  const [searchResults, setSearchResults] = useState<SearchMatch[]>([]);
   const [activeMatchIndex, setActiveMatchIndex] = useState<number>(0);
   const [searchBusy, setSearchBusy] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
@@ -538,18 +541,33 @@ export default function EditorPage() {
   const [ltvStatus, setLtvStatus] = useState<LtvStatus | null>(null);
   const [managedSignatures, setManagedSignatures] = useState<ManagedSignature[]>([]);
   const [revisionEntries, setRevisionEntries] = useState<RevisionViewEntry[]>([]);
-  signaturesRef.current = signatures;
+
+  // Mirror overlay state into refs for event handlers and async callbacks.
+  // Runs after every commit (before paint, ahead of the passive effects), so
+  // handlers always see the committed values without writing refs during render.
+  useLayoutEffect(() => {
+    removedImagesRef.current = removedImages;
+    drawnPathsRef.current = drawnPaths;
+    floatingTextsRef.current = floatingTexts;
+    floatingImagesRef.current = floatingImages;
+    signaturesRef.current = signatures;
+  });
 
   const refreshSignatureLibrary = useCallback(() => {
     setSignatureLibraryEntries(orderLibraryByRecent(getSignatureLibrary().list()));
   }, []);
 
-  // Auto-close properties panel on mobile
-  useEffect(() => {
+  // Auto-close properties panel when the layout switches to mobile
+  const [panelLayoutIsMobile, setPanelLayoutIsMobile] = useState(isMobile);
+  if (panelLayoutIsMobile !== isMobile) {
+    setPanelLayoutIsMobile(isMobile);
     if (isMobile) setIsPanelOpen(false);
-  }, [isMobile]);
+  }
 
   useEffect(() => {
+    // The library lives in localStorage, which is only readable in the browser,
+    // so it is loaded after mount to keep the prerendered HTML hydration-safe.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshSignatureLibrary();
   }, [refreshSignatureLibrary]);
 
@@ -632,8 +650,8 @@ export default function EditorPage() {
   }, []);
 
   const resolveEditStyleRange = useCallback((line: TextLine, start: number, end: number) => {
-    let s = Math.max(0, Math.min(start, line.text.length));
-    let e = Math.max(s, Math.min(end, line.text.length));
+    const s = Math.max(0, Math.min(start, line.text.length));
+    const e = Math.max(s, Math.min(end, line.text.length));
     // Collapsed caret is handled as typing-style (no existing-text restyle).
     if (e <= s) return { start: s, end: s };
     return { start: s, end: e };
@@ -1058,18 +1076,26 @@ export default function EditorPage() {
     return () => { cancelled = true; };
   }, [doc, thumbnailKey]);
 
-  // Reset edit state when doc or page changes
+  // Reset edit state when doc or page changes. Both change from many places
+  // (load, navigation, page operations), and the reset also clears refs
+  // (editingLineRef via setEditingLine, spatialIndexRef), which must not be
+  // written during render, so this stays an effect.
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional reset on doc/page change, see above */
     setEditingLine(null);
     setSelectedLine(null);
     setEditText('');
     setSelectedDisplayItem(null);
     setDisplayItems([]);
+    /* eslint-enable react-hooks/set-state-in-effect */
     spatialIndexRef.current = null;
   }, [doc, currentPage, setEditingLine]);
 
-  // Sync text properties sidebar from selected line (use FontData BaseFont when available)
-  useEffect(() => {
+  // Sync text properties sidebar from selected line (use FontData BaseFont when available).
+  // Adjusted during render when the selection (or its fonts) changes, not in an effect.
+  const [styleSyncSource, setStyleSyncSource] = useState({ selectedLine, renderResult });
+  if (styleSyncSource.selectedLine !== selectedLine || styleSyncSource.renderResult !== renderResult) {
+    setStyleSyncSource({ selectedLine, renderResult });
     if (selectedLine && selectedLine.runs.length > 0) {
       const run = selectedLine.runs[0];
       // Keep fractional size so overlay matches canvas (rounding caused a visible jump)
@@ -1086,7 +1112,7 @@ export default function EditorPage() {
         setTextColor(hex);
       }
     }
-  }, [selectedLine, renderResult]);
+  }
 
   // ── Render current page ──
   useEffect(() => {
@@ -1616,7 +1642,7 @@ export default function EditorPage() {
   // ── Begin an edit session with frozen line anchor + undo snapshot ──
   const beginEditSession = useCallback((line: TextLine, caretAt?: number) => {
     initialRunTextRef.current = line.text;
-    editAnchorLineRef.current = {
+    setEditAnchorLine({
       ...line,
       runs: line.runs.map(r => ({
         ...r,
@@ -1626,7 +1652,7 @@ export default function EditorPage() {
           : undefined,
       })),
       segments: line.segments.map(s => ({ ...s, run: s.run })),
-    };
+    });
     editingBlockIdRef.current = line.id;
     pendingStylesRef.current = [];
     typingStyleRef.current = {};
@@ -1703,7 +1729,7 @@ export default function EditorPage() {
     const hasPendingStyles = pendingStyles.length > 0;
 
     if (!textChanged && !moved && !hasPendingStyles) {
-      editAnchorLineRef.current = null;
+      setEditAnchorLine(null);
       undoSnapshotRef.current = null;
       editingBlockIdRef.current = null;
       pendingStylesRef.current = [];
@@ -1737,8 +1763,8 @@ export default function EditorPage() {
         }));
 
       if (textChanged) {
-        let commitText = editTextRef.current || editText;
-        let caretAfter = editSelRef.current.end;
+        const commitText = editTextRef.current || editText;
+        const caretAfter = editSelRef.current.end;
         // Do NOT collapse multi-spaces on commit — live overlay gaps were real
         // inserts, and smashing them made spaces vanish on click-away.
         const editResult = engine.applyLineTextEdit(
@@ -1899,7 +1925,7 @@ export default function EditorPage() {
           (commitText.match(/\s/g) || []).length - (oldTextForPack.match(/\s/g) || []).length;
         if (packDeltaSpaces <= 0) {
           try {
-            let packBytes = engine.getPageContentBytes(page, doc.objects);
+            const packBytes = engine.getPageContentBytes(page, doc.objects);
             const interpreted = engine.interpretPage(packBytes, page, doc.objects);
             const flow = engine.buildDocumentFlow(interpreted.textRuns);
             const normalizeDashes = (t: string) => t.replace(/[\u2013\u2014\u2212]/g, '-');
@@ -1926,7 +1952,7 @@ export default function EditorPage() {
 
 
       pushEditorHistory('text-edit');
-      editAnchorLineRef.current = null;
+      setEditAnchorLine(null);
       undoSnapshotRef.current = null;
       editingBlockIdRef.current = null;
       pendingStylesRef.current = [];
@@ -1954,7 +1980,7 @@ export default function EditorPage() {
       clearTimeout(blurTimeoutRef.current);
       blurTimeoutRef.current = null;
     }
-    editAnchorLineRef.current = null;
+    setEditAnchorLine(null);
     undoSnapshotRef.current = null;
     editingBlockIdRef.current = null;
     pendingStylesRef.current = [];
@@ -2068,6 +2094,10 @@ export default function EditorPage() {
     setSelectedCertificateId(id);
   }, []);
 
+  // The PDF document model is a mutable engine object: engine edits update it in
+  // place and a re-render is requested through renderKey. Signing follows the
+  // same contract (doc.rawBytes becomes the signed file), hence the exception.
+  // eslint-disable-next-line react-hooks/immutability
   const handleCryptographicSign = useCallback(async () => {
     if (!doc) {
       setError('No document loaded.');
@@ -2127,6 +2157,7 @@ export default function EditorPage() {
         appearanceText: identity?.leaf?.subject.commonName ?? identity?.label ?? 'Signed',
         enableTimestamp,
       });
+      // eslint-disable-next-line react-hooks/immutability -- see note above handleCryptographicSign
       doc.rawBytes = result.bytes;
       setPdfSignatureFields(detectSignatureFieldsOnPage(doc, currentPage));
       pushSignatureSnapshot(
@@ -2163,9 +2194,13 @@ export default function EditorPage() {
     setLtvStatus(getLtvStatus(doc));
   }, [doc]);
 
-  useEffect(() => {
+  // Refresh the multi-signature panel when the document or its signature
+  // fields change (adjusted during render rather than in an effect).
+  const [multiSigSource, setMultiSigSource] = useState({ doc, pdfSignatureFields });
+  if (multiSigSource.doc !== doc || multiSigSource.pdfSignatureFields !== pdfSignatureFields) {
+    setMultiSigSource({ doc, pdfSignatureFields });
     refreshMultiSigPanel();
-  }, [refreshMultiSigPanel, pdfSignatureFields]);
+  }
 
   const handleValidateSignatures = useCallback(async () => {
     if (!doc) return;
@@ -2222,26 +2257,22 @@ export default function EditorPage() {
     setIsDirty(true);
   }, [doc, selectedFormField]);
 
-  // ── Document-wide search effect ──
-  useEffect(() => {
-    if (!doc || !engineRef.current || !findText.trim()) {
-      setSearchResults([]);
-      setActiveMatchIndex(0);
-      return;
-    }
+  // ── Document-wide search ──
+  // Derived from the document during render. Content edits mutate `doc` in
+  // place, so `renderKey` (bumped on every edit) is what invalidates the scan.
+  const searchResults = useMemo<SearchMatch[]>(() => {
+    void renderKey;
+    if (!doc || !findText.trim()) return [];
 
-    let cancelled = false;
     const query = findText.trim();
     const lowerQuery = caseSensitive ? query : query.toLowerCase();
-    const engine = engineRef.current;
     const matches: SearchMatch[] = [];
 
     for (let p = 0; p < doc.pages.length; p++) {
-      if (cancelled) return;
       const page = doc.pages[p];
       try {
-        const bytes = engine.getPageContentBytes(page, doc.objects);
-        const interpreted = engine.interpretPage(bytes, page, doc.objects);
+        const bytes = getPageContentBytes(page, doc.objects);
+        const interpreted = interpretPage(bytes, page, doc.objects);
 
         for (const run of interpreted.textRuns) {
           const text = run.text;
@@ -2284,25 +2315,18 @@ export default function EditorPage() {
       }
     }
 
-    if (!cancelled) {
-      setSearchResults(matches);
-      if (matches.length > 0) {
-        setActiveMatchIndex(prev => {
-          const nextIdx = prev >= 0 && prev < matches.length ? prev : 0;
-          if (matches[nextIdx].pageIndex !== currentPage) {
-            setCurrentPage(matches[nextIdx].pageIndex);
-          }
-          return nextIdx;
-        });
-      } else {
-        setActiveMatchIndex(0);
-      }
-    }
+    return matches;
+  }, [findText, caseSensitive, doc, renderKey]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [findText, caseSensitive, doc, renderKey, currentPage]);
+  // When the results change, keep the active match in range and bring its page into view.
+  const [seenSearchResults, setSeenSearchResults] = useState(searchResults);
+  if (seenSearchResults !== searchResults) {
+    setSeenSearchResults(searchResults);
+    const nextIdx = activeMatchIndex >= 0 && activeMatchIndex < searchResults.length ? activeMatchIndex : 0;
+    if (nextIdx !== activeMatchIndex) setActiveMatchIndex(nextIdx);
+    const target = searchResults[nextIdx];
+    if (target && target.pageIndex !== currentPage) setCurrentPage(target.pageIndex);
+  }
 
   const handleNextMatch = useCallback(() => {
     if (searchResults.length === 0) return;
@@ -2953,7 +2977,7 @@ export default function EditorPage() {
 
     // 1) Erase ephemeral overlay strokes / shapes
     setDrawnPaths(prev => {
-      let newPaths: DrawnPath[] = [];
+      const newPaths: DrawnPath[] = [];
       let modified = false;
       for (const path of prev) {
         const kind = path.kind ?? 'freehand';
@@ -3180,8 +3204,8 @@ export default function EditorPage() {
       }
 
       if (fTexts.length > 0 || fImages.length > 0) {
-        let contentBytes = engine.getPageContentBytes(page, doc.objects);
-        let newContentBytes: any = new Uint8Array(contentBytes);
+        const contentBytes = engine.getPageContentBytes(page, doc.objects);
+        let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
 
         for (const ft of fTexts) {
           if (!ft.text.trim()) continue;
@@ -3253,7 +3277,7 @@ export default function EditorPage() {
       newObjects.set(k, v);
     }
     const newPages: PDFPageInfo[] = targetDoc.pages.map((p) => {
-      const pageDict = new (engine as any).PDFDict();
+      const pageDict = new engine.PDFDict();
       for (const [k, v] of p.dict.entries()) {
         pageDict.set(k, v);
       }
@@ -3264,7 +3288,7 @@ export default function EditorPage() {
         ...p,
         dict: pageDict,
         contentRefs: [...p.contentRefs],
-        resources: p.resources ? p.resources : new (engine as any).PDFDict(),
+        resources: p.resources ? p.resources : new engine.PDFDict(),
       };
     });
 
@@ -3403,8 +3427,8 @@ export default function EditorPage() {
 
     if (texts.length > 0 || images.length > 0) {
       isolateResources(page);
-      let contentBytes = engine.getPageContentBytes(page, exportDoc.objects);
-      let newContentBytes: any = new Uint8Array(contentBytes);
+      const contentBytes = engine.getPageContentBytes(page, exportDoc.objects);
+      let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
 
       for (const ft of texts) {
         if (!ft.text.trim()) continue;
@@ -4481,7 +4505,7 @@ export default function EditorPage() {
           layer: watermarkLayer,
           fontName: watermarkFontName,
           fontSize: Math.round(72 * (watermarkSize / 100)),
-          position: watermarkPosition as any,
+          position: watermarkPosition,
           pageIndices
         };
       } else if (watermarkType === 'shape') {
@@ -4520,9 +4544,9 @@ export default function EditorPage() {
           rotation: watermarkRotation,
           tile: watermarkMosaic,
           layer: watermarkLayer,
-          position: watermarkPosition as any,
+          position: watermarkPosition,
           pageIndices
-        } as any;
+        };
       } else {
         if (!watermarkImageBytes || !watermarkImageDims || !watermarkImageFile) {
           setError('Please upload an image first');
@@ -4543,7 +4567,7 @@ export default function EditorPage() {
           rotation: watermarkRotation,
           tile: watermarkMosaic,
           layer: watermarkLayer,
-          position: watermarkPosition as any,
+          position: watermarkPosition,
           pageIndices
         };
       }
@@ -6371,8 +6395,8 @@ export default function EditorPage() {
             })}
 
             {/* Word-like line editor — same size/position as canvas text */}
-            {editingLine && editAnchorLineRef.current && renderResult && doc && (() => {
-              const anchor = editAnchorLineRef.current!;
+            {editingLine && editAnchorLine && renderResult && doc && (() => {
+              const anchor = editAnchorLine;
               const bounds = getLineBounds(anchor);
               const page = doc.pages[currentPage];
               const { mediaBox } = page;
@@ -6387,10 +6411,6 @@ export default function EditorPage() {
                 if (ov.fontSize != null) {
                   maxFontSizeCss = Math.max(maxFontSizeCss, ov.fontSize * scale);
                 }
-              }
-              const tsSize = typingStyleRef.current.fontSize;
-              if (tsSize != null) {
-                maxFontSizeCss = Math.max(maxFontSizeCss, tsSize * scale);
               }
               // Include sidebar size while typing so the box grows with the caret style
               if (editSel.end <= editSel.start && textFontSize > 0) {
@@ -6421,7 +6441,7 @@ export default function EditorPage() {
               const pathItems = strokePaths;
               const edits = distributeTextChangeToSegments(
                 anchor,
-                initialRunTextRef.current || anchor.text,
+                anchor.text,
                 editText,
                 caretPos,
               );

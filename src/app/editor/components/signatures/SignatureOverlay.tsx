@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { PenLine, Lock, Trash2, RotateCw, X } from 'lucide-react';
 import type { VisualSignature } from '@/engine';
+import { useLatestRef, useWindowPointerDrag } from '../../hooks/usePointerDrag';
 
 export interface SignatureOverlayProps {
   signature: VisualSignature;
@@ -52,10 +53,14 @@ export function SignatureOverlay(props: SignatureOverlayProps) {
     height: sig.height,
     rotation: sig.rotation,
   });
-  const liveRef = useRef(live);
-  liveRef.current = live;
+  const liveRef = useLatestRef(live);
 
-  useEffect(() => {
+  // Re-sync the live frame whenever the signature changes
+  // (adjusting state during render instead of in an effect).
+  const sigKey = `${sig.id}|${sig.x}|${sig.y}|${sig.width}|${sig.height}|${sig.rotation}`;
+  const [syncedSigKey, setSyncedSigKey] = useState(sigKey);
+  if (syncedSigKey !== sigKey) {
+    setSyncedSigKey(sigKey);
     setLive({
       x: sig.x,
       y: sig.y,
@@ -63,7 +68,7 @@ export function SignatureOverlay(props: SignatureOverlayProps) {
       height: sig.height,
       rotation: sig.rotation,
     });
-  }, [sig.x, sig.y, sig.width, sig.height, sig.rotation, sig.id]);
+  }
 
   const dragMode = useRef<DragMode>(null);
   const origin = useRef({
@@ -125,14 +130,12 @@ export function SignatureOverlay(props: SignatureOverlayProps) {
         });
       }
     },
-    [scale, sig.locked, toCss],
+    [liveRef, scale, sig.locked, toCss],
   );
 
   const endDrag = useCallback(() => {
     const mode = dragMode.current;
     dragMode.current = null;
-    window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', endDrag);
     if (!mode || sig.locked) return;
 
     const cur = liveRef.current;
@@ -154,7 +157,9 @@ export function SignatureOverlay(props: SignatureOverlayProps) {
         onCommitRotate(sig.id, cur.rotation);
       }
     }
-  }, [onCommitMove, onCommitResize, onCommitRotate, onPointerMove, sig.id, sig.locked]);
+  }, [onCommitMove, onCommitResize, onCommitRotate, liveRef, sig.id, sig.locked]);
+
+  const attachDragListeners = useWindowPointerDrag(onPointerMove, endDrag);
 
   const begin = useCallback(
     (mode: DragMode, e: React.PointerEvent) => {
@@ -181,10 +186,9 @@ export function SignatureOverlay(props: SignatureOverlayProps) {
           cy: (prect?.top ?? 0) + box.top + box.height / 2,
         } as object),
       };
-      window.addEventListener('pointermove', onPointerMove);
-      window.addEventListener('pointerup', endDrag);
+      attachDragListeners();
     },
-    [endDrag, onPointerMove, onSelect, sig.id, sig.locked, toCss],
+    [attachDragListeners, liveRef, onSelect, sig.id, sig.locked, toCss],
   );
 
   const box = toCss(live);

@@ -493,8 +493,8 @@ function loadDescendantFont(
         }
       }
     }
-  } else if (!cidToGidRef || (cidToGidRef as any instanceof PDFName && (cidToGidRef as any).name === 'Identity')) {
-    // If CIDToGIDMap is /Identity, CID = GID (no mapping needed)
+  } else {
+    // No CIDToGIDMap: treat it as /Identity (CID = GID, no mapping needed).
     // Populate widths directly from TrueType font for all CIDs if W array was missing or incomplete
     if (fontData.ttfFont && fontData.widths.size === 0) {
       const numGlyphs = fontData.ttfFont.numGlyphs;

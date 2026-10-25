@@ -43,7 +43,7 @@ export function utf8Encode(s: string): Uint8Array {
   // Minimal UTF-8 fallback
   const out: number[] = [];
   for (let i = 0; i < s.length; i++) {
-    let c = s.charCodeAt(i);
+    const c = s.charCodeAt(i);
     if (c < 0x80) out.push(c);
     else if (c < 0x800) {
       out.push(0xc0 | (c >> 6), 0x80 | (c & 0x3f));

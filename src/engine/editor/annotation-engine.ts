@@ -631,7 +631,7 @@ export function addAnnotationToPage(
   annotRef: PDFRef,
   objects: Map<string, PDFObject>,
 ): void {
-  let annots = pageDict.get('Annots');
+  const annots = pageDict.get('Annots');
 
   if (!annots) {
     // Create new Annots array

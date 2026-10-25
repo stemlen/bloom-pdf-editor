@@ -115,16 +115,26 @@ export function ExportPanel({
     CONVERT_FORMATS.find((f) => f.id === selectedConvert) ?? CONVERT_FORMATS[0]!;
   const formatInfo = EXPORT_FORMATS.find((f) => f.id === selectedFormat)!;
 
-  // Reset + health check when panel opens
+  // Reset when the panel opens (or the page count changes while open).
+  // Done during render rather than in an effect to avoid a cascading render.
+  const openKey = isOpen ? `open|${totalPages}` : 'closed';
+  const [lastOpenKey, setLastOpenKey] = useState(openKey);
+  if (openKey !== lastOpenKey) {
+    setLastOpenKey(openKey);
+    if (isOpen) {
+      setExportDone(false);
+      setExportError(null);
+      setExportProgress(0);
+      setJobLabel(null);
+      setJobProgress(0);
+      setCustomTo(totalPages);
+      setEngineOnline(null);
+    }
+  }
+
+  // Health check while the panel is open
   useEffect(() => {
     if (!isOpen) return;
-    setExportDone(false);
-    setExportError(null);
-    setExportProgress(0);
-    setJobLabel(null);
-    setJobProgress(0);
-    setCustomTo(totalPages);
-    setEngineOnline(null);
     let cancelled = false;
     void checkBloomHealth().then((h) => {
       if (cancelled) return;

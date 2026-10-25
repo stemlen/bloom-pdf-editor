@@ -29,16 +29,19 @@ export function WatermarkPreview({
   watermarkImageDims, watermarkImageFile, watermarkShapeType, watermarkShapeColor,
   watermarkBlendMode,
 }: WatermarkPreviewProps) {
-  const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (watermarkType === 'image' && watermarkImageFile) {
-      const url = URL.createObjectURL(watermarkImageFile);
-      setImgUrl(url);
-      return () => URL.revokeObjectURL(url);
-    }
-    setImgUrl(null);
-  }, [watermarkType, watermarkImageFile]);
+    if (!watermarkImageFile) return;
+    // An object URL is an external resource that must be revoked, so it is
+    // created and released here and mirrored into state for rendering.
+    const url = URL.createObjectURL(watermarkImageFile);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [watermarkImageFile]);
+
+  const imgUrl = watermarkType === 'image' && watermarkImageFile ? objectUrl : null;
 
   if (!doc || !doc.pages[currentPage]) return null;
 
@@ -54,8 +57,8 @@ export function WatermarkPreview({
   const imgHeightCss = watermarkImageDims?.height ? (watermarkImageDims.height * (watermarkSize / 100)) * scale : 0;
   const padCss = 30 * scale;
 
-  let textWidthCss = (watermarkText.length * (fontSizeCss / scale) * 0.5 * scale);
-  let textHeightCss = fontSizeCss;
+  const textWidthCss = (watermarkText.length * (fontSizeCss / scale) * 0.5 * scale);
+  const textHeightCss = fontSizeCss;
 
   let wmWidthCss = watermarkType === 'text' ? textWidthCss : watermarkType === 'shape' ? textWidthCss + 40 * scale : imgWidthCss;
   let wmHeightCss = watermarkType === 'text' ? textHeightCss : watermarkType === 'shape' ? textHeightCss + 40 * scale : imgHeightCss;
