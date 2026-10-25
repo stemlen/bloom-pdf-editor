@@ -639,6 +639,30 @@ export default function EditorPage() {
     pushEditorHistory('baseline', undefined, pageIndex);
   }, [pushEditorHistory]);
 
+  /**
+   * Updates the placed images and keeps the ref in step. With a label the
+   * change is also recorded in the unified history (BE-308); drags record one
+   * entry on release via recordFloatingImages instead.
+   */
+  const updateFloatingImages = useCallback((
+    updater: (prev: FloatingImage[]) => FloatingImage[],
+    label?: string,
+  ) => {
+    const next = updater(floatingImagesRef.current);
+    floatingImagesRef.current = next;
+    setFloatingImages(next);
+    if (label) {
+      pushEditorHistory(label, { floatingImages: next });
+      setIsDirty(true);
+    }
+    return next;
+  }, [pushEditorHistory]);
+
+  const recordFloatingImages = useCallback((label: string) => {
+    pushEditorHistory(label, { floatingImages: floatingImagesRef.current });
+    setIsDirty(true);
+  }, [pushEditorHistory]);
+
   const pushSignatureSnapshot = useCallback((next: VisualSignature[], label: string) => {
     setSignatures(next);
     signaturesRef.current = next;
@@ -3051,9 +3075,8 @@ export default function EditorPage() {
             dataUrl: jpegDataUrl,
             rotation: 0,
           };
-          setFloatingImages(prev => [...prev, newImg]);
+          updateFloatingImages(prev => [...prev, newImg], 'add-image');
           setActiveFloatingImageId(newImg.id);
-          setIsDirty(true);
         };
         img.src = dataUrl;
       };
@@ -3106,7 +3129,7 @@ export default function EditorPage() {
     setSelectedSignatureId(sig.id);
     setActiveLibraryId(entry.id);
     pushRecentSignatureId(entry.id);
-  }, [doc, renderResult, currentPage, scale, pushSignatureSnapshot]);
+  }, [doc, renderResult, currentPage, scale, pushSignatureSnapshot, updateFloatingImages]);
 
   const applyEraser = useCallback((x: number, y: number, opts?: { deferAnnotRender?: boolean }) => {
     const eraserRadius = eraserSize / 2;
@@ -4091,6 +4114,7 @@ export default function EditorPage() {
       startPdfX: box.pdfX,
       startPdfY: box.pdfY
     };
+    let moved = false;
 
     const handleMove = (me: PointerEvent) => {
       if (!dragInfo.current || !doc || !renderResult) return;
@@ -4101,7 +4125,8 @@ export default function EditorPage() {
 
       const { startPdfX, startPdfY } = dragInfo.current;
 
-      setFloatingImages(prev => prev.map(p => p.id === id ? {
+      moved = true;
+      updateFloatingImages(prev => prev.map(p => p.id === id ? {
         ...p,
         pdfX: startPdfX + pdfDx,
         pdfY: startPdfY + pdfDy,
@@ -4110,13 +4135,14 @@ export default function EditorPage() {
 
     const handleUp = () => {
       dragInfo.current = null;
+      if (moved) recordFloatingImages('move-image');
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }, [floatingImages, scale, doc, renderResult]);
+  }, [floatingImages, scale, doc, renderResult, updateFloatingImages, recordFloatingImages]);
 
   const handleFloatingImageRotateDown = useCallback((e: React.PointerEvent, id: string) => {
     e.preventDefault();
@@ -4132,6 +4158,7 @@ export default function EditorPage() {
     const fi = floatingImagesRef.current.find(f => f.id === id);
     const initialRot = fi?.rotation || 0;
     const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI);
+    let rotated = false;
 
     const onPointerMove = (ev: PointerEvent) => {
       const currentAngle = Math.atan2(ev.clientY - centerY, ev.clientX - centerX) * (180 / Math.PI);
@@ -4141,18 +4168,19 @@ export default function EditorPage() {
       if (ev.shiftKey) {
         newRot = Math.round(newRot / 15) * 15;
       }
-      setFloatingImages(prev => prev.map(p => p.id === id ? { ...p, rotation: newRot } : p));
-      setIsDirty(true);
+      rotated = true;
+      updateFloatingImages(prev => prev.map(p => p.id === id ? { ...p, rotation: newRot } : p));
     };
 
     const onPointerUp = () => {
+      if (rotated) recordFloatingImages('rotate-image');
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
-  }, []);
+  }, [updateFloatingImages, recordFloatingImages]);
 
   const handleImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -4191,7 +4219,8 @@ export default function EditorPage() {
         }
 
         if (replacingImageIdRef.current) {
-          setFloatingImages(prev => prev.map(p => p.id === replacingImageIdRef.current ? { ...p, dataUrl: jpegDataUrl } : p));
+          const replacingId = replacingImageIdRef.current;
+          updateFloatingImages(prev => prev.map(p => p.id === replacingId ? { ...p, dataUrl: jpegDataUrl } : p), 'replace-image');
           replacingImageIdRef.current = null;
           return;
         }
@@ -4221,14 +4250,14 @@ export default function EditorPage() {
           pdfHeight,
           dataUrl: jpegDataUrl,
         };
-        setFloatingImages(prev => [...prev, newImg]);
+        updateFloatingImages(prev => [...prev, newImg], 'add-image');
         setActiveFloatingImageId(newImg.id);
       };
       img.src = dataUrl;
     };
     reader.readAsDataURL(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [doc, currentPage, renderResult, pushEditorHistory]);
+  }, [doc, currentPage, renderResult, pushEditorHistory, updateFloatingImages]);
 
   const toEditableImage = useCallback((item: ImageItem): EditableObject => ({
     id: `sel-image-${item.name}`,
@@ -4305,13 +4334,12 @@ export default function EditorPage() {
         dataUrl,
       };
 
-      setFloatingImages(prev => [...prev, newImg]);
+      updateFloatingImages(prev => [...prev, newImg], 'copy-image');
       setActiveFloatingImageId(newImg.id);
-      setIsDirty(true);
     } catch (e) {
       console.error('[Editor] Copy image failed:', e);
     }
-  }, [doc, currentPage, selectedDisplayItem]);
+  }, [doc, currentPage, selectedDisplayItem, updateFloatingImages]);
 
   // ── Hidden / line input — preview only; PDF commits on submit ──
   const handleHiddenInput = useCallback((e: React.FormEvent<HTMLTextAreaElement | HTMLInputElement>) => {
@@ -5325,16 +5353,15 @@ export default function EditorPage() {
       dataUrl: record.dataUrl,
     };
 
-    setFloatingImages(prev => [...prev, newFloatingImage]);
+    updateFloatingImages(prev => [...prev, newFloatingImage], 'restore-image');
     setActiveFloatingImageId(newFloatingImage.id);
-    setIsDirty(true);
     // A restored image leaves the bin, so it can't be restored twice (BE-310).
     setRemovedImages(prev => {
       const next = prev.filter(r => r.id !== record.id);
       void saveRemovedImages(next);
       return next;
     });
-  }, [doc, currentPage]);
+  }, [doc, currentPage, updateFloatingImages]);
 
   const handleInsertRemovedImage = useCallback((record: RemovedImageRecord) => {
     if (!doc) return;
@@ -5357,10 +5384,9 @@ export default function EditorPage() {
       dataUrl: record.dataUrl,
     };
 
-    setFloatingImages(prev => [...prev, newFloatingImage]);
+    updateFloatingImages(prev => [...prev, newFloatingImage], 'restore-image');
     setActiveFloatingImageId(newFloatingImage.id);
-    setIsDirty(true);
-  }, [doc, currentPage]);
+  }, [doc, currentPage, updateFloatingImages]);
 
   const handleDeleteRemovedImage = useCallback((id: string) => {
     setRemovedImages(prev => {
@@ -5477,7 +5503,7 @@ export default function EditorPage() {
             return updated;
           });
         }
-        setFloatingImages(prev => prev.filter(p => p.id !== activeFloatingImageId));
+        updateFloatingImages(prev => prev.filter(p => p.id !== activeFloatingImageId), 'delete-image');
         setActiveFloatingImageId(null);
       } else if (e.key === 'r' || e.key === 'R') {
         if (!e.metaKey && !e.ctrlKey) setActiveTool('redact');
@@ -5497,7 +5523,7 @@ export default function EditorPage() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectTool, goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures]);
+  }, [selectTool, goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures, updateFloatingImages]);
 
   // ── Global clipboard paste listener for images (Ctrl+V on Windows / Cmd+V on Mac) ──
   useEffect(() => {
@@ -5571,9 +5597,8 @@ export default function EditorPage() {
                 rotation: 0,
               };
 
-              setFloatingImages(prev => [...prev, newImg]);
+              updateFloatingImages(prev => [...prev, newImg], 'paste-image');
               setActiveFloatingImageId(newImg.id);
-              setIsDirty(true);
             };
             img.src = dataUrl;
           };
@@ -5585,7 +5610,7 @@ export default function EditorPage() {
 
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, [doc, currentPage]);
+  }, [doc, currentPage, updateFloatingImages]);
 
   // Clean, Minimalist 3D Tilted Pink Square Rubber Block Eraser Cursor
   const eraser3dSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><defs><filter id="er-pinksq-shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="1" dy="1.4" stdDeviation="1.2" flood-color="#000000" flood-opacity="0.45"/></filter><linearGradient id="er-pink-top" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FFA8E0"/><stop offset="60%" stop-color="#FF65C8"/><stop offset="100%" stop-color="#E840A8"/></linearGradient><linearGradient id="er-pink-left" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FF52B7"/><stop offset="100%" stop-color="#D6208A"/></linearGradient><linearGradient id="er-pink-right" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#BF157A"/><stop offset="100%" stop-color="#80094F"/></linearGradient></defs><g filter="url(#er-pinksq-shadow)"><path d="M 4 16 L 16 4 L 28 16 L 28 19 L 16 31 L 4 19 Z" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/><path d="M 4 16 L 16 4 L 28 16 L 16 28 Z" fill="url(#er-pink-top)" stroke="#80094F" stroke-width="0.6"/><path d="M 4 16 L 16 28 L 16 31 L 4 19 Z" fill="url(#er-pink-left)" stroke="#80094F" stroke-width="0.6"/><path d="M 16 28 L 28 16 L 28 19 L 16 31 Z" fill="url(#er-pink-right)" stroke="#80094F" stroke-width="0.6"/><path d="M 4 16 L 16 4 L 22 10 L 10 22 Z" fill="#FFFFFF" fill-opacity="0.45"/><circle cx="4" cy="28" r="0.8" fill="#FFFFFF" stroke="#80094F" stroke-width="0.4"/></g></svg>`;
@@ -6506,7 +6531,7 @@ export default function EditorPage() {
                               return updated;
                             });
                           }
-                          setFloatingImages(prev => prev.filter(p => p.id !== fi.id));
+                          updateFloatingImages(prev => prev.filter(p => p.id !== fi.id), 'delete-image');
                           if (activeFloatingImageId === fi.id) setActiveFloatingImageId(null);
                         }}
                       >
@@ -6536,9 +6561,8 @@ export default function EditorPage() {
                               pdfHeight: fi.pdfHeight,
                               rotation: fi.rotation,
                             };
-                            setFloatingImages(prev => [...prev, dup]);
+                            updateFloatingImages(prev => [...prev, dup], 'duplicate-image');
                             setActiveFloatingImageId(dup.id);
-                            setIsDirty(true);
                           }
                         }}
                       >
@@ -6570,7 +6594,7 @@ export default function EditorPage() {
                             value={Math.round((fi.pdfWidth * 2.54 * 10) / 72) / 10}
                             onChange={e => {
                               const newW = (parseFloat(e.target.value) * 72) / 2.54;
-                              if (newW > 0) setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: newW } : p));
+                              if (newW > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: newW } : p), 'resize-image');
                             }}
                             className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
                             step="0.1"
@@ -6584,7 +6608,7 @@ export default function EditorPage() {
                             value={Math.round((fi.pdfHeight * 2.54 * 10) / 72) / 10}
                             onChange={e => {
                               const newH = (parseFloat(e.target.value) * 72) / 2.54;
-                              if (newH > 0) setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfHeight: newH } : p));
+                              if (newH > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfHeight: newH } : p), 'resize-image');
                             }}
                             className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
                             step="0.1"
@@ -6598,7 +6622,7 @@ export default function EditorPage() {
                             value={Math.round(rot)}
                             onChange={e => {
                               const val = (parseFloat(e.target.value) || 0) % 360;
-                              setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: (val + 360) % 360 } : p));
+                              updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: (val + 360) % 360 } : p), 'rotate-image');
                             }}
                             className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
                           />
@@ -6608,7 +6632,7 @@ export default function EditorPage() {
                             className="p-1 hover:bg-muted rounded text-foreground/90 hover:text-primary transition-colors"
                             onClick={(e) => {
                               e.stopPropagation();
-                              setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: ((p.rotation || 0) + 90) % 360 } : p));
+                              updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: ((p.rotation || 0) + 90) % 360 } : p), 'rotate-image');
                             }}
                           >
                             <RotateCw size={11} />
@@ -6628,13 +6652,16 @@ export default function EditorPage() {
                       const startW = fi.pdfWidth * scale;
                       const startH = fi.pdfHeight * scale;
 
+                      let resized = false;
                       const handleMove = (me: PointerEvent) => {
                         const newW = startW + (me.clientX - startX);
                         const newH = startH + (me.clientY - startY);
-                        setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: Math.max(10, newW / scale), pdfHeight: Math.max(10, newH / scale) } : p));
+                        resized = true;
+                        updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: Math.max(10, newW / scale), pdfHeight: Math.max(10, newH / scale) } : p));
                       };
 
                       const handleUp = () => {
+                        if (resized) recordFloatingImages('resize-image');
                         window.removeEventListener('pointermove', handleMove);
                         window.removeEventListener('pointerup', handleUp);
                       };
