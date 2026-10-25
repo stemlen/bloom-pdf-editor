@@ -2239,6 +2239,23 @@ export default function EditorPage() {
     refreshMultiSigPanel();
   }
 
+  // Keep the signature summary current: re-check after opening or signing,
+  // instead of showing stale counts until Validate is clicked (BE-512).
+  useEffect(() => {
+    if (!doc || pdfSignatureFields.length === 0) return;
+    let cancelled = false;
+    validateDocumentSignatures(doc, { allowSelfSigned: true })
+      .then((report) => {
+        if (!cancelled) setValidationReport(report);
+      })
+      .catch(() => {
+        /* the Validate button reports errors */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, pdfSignatureFields]);
+
   const handleValidateSignatures = useCallback(async () => {
     if (!doc) return;
     setValidationBusy(true);
