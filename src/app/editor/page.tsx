@@ -1,5 +1,6 @@
 'use client';
 
+import { joinParts } from '@/lib/format';
 import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
@@ -50,7 +51,7 @@ import { useTextStyleActions, type TextStyleUI } from './hooks/useTextStyleActio
 import { useIsMobile } from './hooks/useIsMobile';
 import { Lotus } from '@/components/art/Doodles';
 import { LostPageIllustration } from '@/components/art/Illustrations';
-import { friendlyPdfError } from '@/lib/pdfErrors';
+import { friendlyPdfError, actionErrorMessage } from '@/lib/pdfErrors';
 
 export interface SearchMatch {
   id: string;
@@ -1304,7 +1305,7 @@ export default function EditorPage() {
       } catch (e) {
         if (cancelled) return;
         console.error('[Editor] Render failed:', e);
-        setError(`Render failed: ${e instanceof Error ? e.message : String(e)}`);
+        setError(actionErrorMessage('Couldn\'t display this page', e));
       }
       setIsRendering(false);
     }
@@ -2004,7 +2005,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Edit failed:', e);
-      setError(`Edit failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t save that edit', e));
     } finally {
       setIsSaving(false);
     }
@@ -2110,7 +2111,7 @@ export default function EditorPage() {
       setRenderKey((k) => k + 1);
     } catch (err) {
       console.error('[Editor] Place signature in field failed:', err);
-      setError(`Place signature failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t place the signature', err));
     }
   }, [doc, activeLibraryId, currentPage, pushSignatureSnapshot]);
 
@@ -2212,7 +2213,7 @@ export default function EditorPage() {
       }
     } catch (err) {
       console.error('[Editor] Cryptographic sign failed:', err);
-      setError(`Digital sign failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t sign the document', err));
     } finally {
       setCryptoSignBusy(false);
     }
@@ -2246,7 +2247,7 @@ export default function EditorPage() {
       setValidationReport(report);
       refreshMultiSigPanel();
     } catch (err) {
-      setError(`Validation failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t check the signatures', err));
     } finally {
       setValidationBusy(false);
     }
@@ -2263,7 +2264,7 @@ export default function EditorPage() {
       signedPristineRef.current = wasPristine;
       refreshMultiSigPanel();
     } catch (err) {
-      setError(`LTV failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t add long-term validation', err));
     }
   }, [doc, refreshMultiSigPanel]);
 
@@ -2467,7 +2468,7 @@ export default function EditorPage() {
         setError('OCR found no text on this page. Try a clearer scan or higher zoom.');
       }
     } catch (e) {
-      setError(`OCR failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t recognize text on this page', e));
     } finally {
       setIsSaving(false);
     }
@@ -2486,7 +2487,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Flatten forms failed:', e);
-      setError(`Flatten failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t flatten the form', e));
     } finally {
       setIsSaving(false);
     }
@@ -2514,7 +2515,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Duplicate line failed:', e);
-      setError(`Duplicate line failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t duplicate the line', e));
     } finally {
       setIsSaving(false);
     }
@@ -2582,7 +2583,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Add table row failed:', e);
-      setError(`Add row failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t add a row', e));
     } finally {
       setIsSaving(false);
     }
@@ -2607,7 +2608,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Add table column failed:', e);
-      setError(`Add column failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t add a column', e));
     } finally {
       setIsSaving(false);
     }
@@ -3943,7 +3944,7 @@ export default function EditorPage() {
       setIsDirty(true);
       setRenderKey(k => k + 1);
     } catch (err) {
-      setError(`Couldn't apply redactions: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t apply redactions', err));
     } finally {
       setIsSaving(false);
     }
@@ -4155,7 +4156,7 @@ export default function EditorPage() {
             setRenderKey(k => k + 1);
           } catch (err) {
             console.error('[Editor] Replace embedded image failed:', err);
-            setError(`Replace failed: ${err instanceof Error ? err.message : String(err)}`);
+            setError(actionErrorMessage('Couldn\'t replace the text', err));
           }
           return;
         }
@@ -4754,11 +4755,11 @@ export default function EditorPage() {
         setShowApplySuccessModal(true);
       }).catch(err => {
         console.error('[Editor] Apply watermark failed:', err);
-        setError(`Failed to apply watermark: ${err instanceof Error ? err.message : String(err)}`);
+        setError(actionErrorMessage('Couldn\'t apply the watermark', err));
       });
     } catch (e) {
       console.error('[Editor] Apply watermark failed:', e);
-      setError(`Failed to apply watermark: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t apply the watermark', e));
     }
   }, [doc, watermarkType, watermarkText, watermarkFontName, watermarkOpacity, watermarkRotation, watermarkSize, watermarkPosition, watermarkMosaic, watermarkPageFrom, watermarkPageTo, watermarkLayer, watermarkColor, watermarkShapeColor, watermarkShapeType, watermarkImageBytes, watermarkImageDims, watermarkImageFile, watermarkBlendMode]);
 
@@ -4844,7 +4845,7 @@ export default function EditorPage() {
       setDetectedWatermarks(detections);
     } catch (e) {
       console.error('[Editor] Scan watermarks failed:', e);
-      setError(`Failed to scan watermarks: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t look for watermarks', e));
     }
   }, [doc]);
 
@@ -4864,7 +4865,7 @@ export default function EditorPage() {
       setIsDirty(true);
     } catch (e) {
       console.error('[Editor] Remove watermarks failed:', e);
-      setError(`Failed to remove watermarks: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t remove the watermarks', e));
     }
   }, [doc, detectedWatermarks]);
 
@@ -4940,7 +4941,7 @@ export default function EditorPage() {
       signedPristineRef.current = keepSigned;
     } catch (e) {
       console.error('[Editor] Download failed:', e);
-      setError(`Download failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t prepare the download', e));
     } finally {
       setIsSaving(false);
     }
@@ -5018,7 +5019,7 @@ export default function EditorPage() {
       setIsDirty(false);
     } catch (e) {
       console.error('[Editor] Compressed download failed:', e);
-      setError(`Compression failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t compress the PDF', e));
     } finally {
       setIsSaving(false);
     }
@@ -5066,7 +5067,7 @@ export default function EditorPage() {
       }
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to delete page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t delete the page', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -5076,7 +5077,7 @@ export default function EditorPage() {
       engineRef.current.rotatePageBy(doc, index, 90);
       refreshAfterPageOp(doc);
     } catch (e) {
-      setError(`Failed to rotate page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t rotate the page', e));
     }
   }, [doc, refreshAfterPageOp]);
 
@@ -5094,7 +5095,7 @@ export default function EditorPage() {
       }
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to reorder pages: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t reorder the pages', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -5107,7 +5108,7 @@ export default function EditorPage() {
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, insertAt);
       refreshAfterPageOp(doc);
     } catch (e) {
-      setError(`Failed to merge PDF: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t merge the PDF', e));
     }
   }, [doc, refreshAfterPageOp]);
 
@@ -5128,7 +5129,7 @@ export default function EditorPage() {
       const base = (fileName || 'document').replace(/\.pdf$/i, '');
       downloadPdfBytes(bytes, `${base}-page-${currentPage + 1}.pdf`);
     } catch (e) {
-      setError(`Failed to split page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t split the page', e));
     } finally {
       setIsSaving(false);
     }
@@ -5160,7 +5161,7 @@ export default function EditorPage() {
         await new Promise((r) => setTimeout(r, 120));
       }
     } catch (e) {
-      setError(`Failed to split pages: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t split the pages', e));
     } finally {
       setIsSaving(false);
     }
@@ -5241,7 +5242,7 @@ export default function EditorPage() {
       setThumbnailKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Delete object failed:', e);
-      setError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t delete that', e));
     }
   }, [doc, currentPage, selectedDisplayItem, fileName, pushEditorHistory]);
 
@@ -5319,7 +5320,7 @@ export default function EditorPage() {
       const nextPage = currentPage >= index ? currentPage + 1 : currentPage;
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to insert blank page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t insert a blank page', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -5332,7 +5333,7 @@ export default function EditorPage() {
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to insert PDF: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t insert the PDF', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -6276,7 +6277,7 @@ export default function EditorPage() {
                     }}
                   >
                     <span className="absolute -top-5 left-0 text-[9px] px-1 rounded bg-sky-700 text-white whitespace-nowrap">
-                      {field.fieldName}{field.signed ? ' · signed' : field.hasAppearance ? ' · AP' : ''}
+                      {joinParts(field.fieldName, field.signed ? 'Signed' : field.hasAppearance && 'Visible')}
                     </span>
                   </div>
                 );

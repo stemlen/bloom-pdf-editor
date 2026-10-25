@@ -1,5 +1,6 @@
 'use client';
 
+import { joinParts } from '@/lib/format';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X, Upload, KeyRound, Trash2, Check } from 'lucide-react';
@@ -166,7 +167,7 @@ export function CertificateImportDialog({
                 value={pemPaste}
                 aria-label="Paste PEM"
                 onChange={(e) => setPemPaste(e.target.value)}
-                placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----BEGIN PRIVATE KEY-----&#10;..."
+                placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----BEGIN PRIVATE KEY-----&#10;…"
                 rows={5}
                 className="w-full rounded-md bg-muted border border-border px-2 py-1.5 text-[11px] font-mono text-foreground outline-none focus:border-border-strong resize-y"
               />
@@ -216,9 +217,11 @@ export function CertificateImportDialog({
                         </div>
                         <div className="text-[10px] text-muted-foreground mt-0.5 truncate">{summary}</div>
                         <div className="text-[10px] text-app-faint mt-1">
-                          {id.source.toUpperCase()}
-                          {id.hasPrivateKey ? ' · key loaded' : ' · cert only (re-import key to sign)'}
-                          {id.certificates.length > 1 ? ` · chain ${id.certificates.length}` : ''}
+                          {joinParts(
+                            id.source.toUpperCase(),
+                            id.hasPrivateKey ? 'Ready to sign' : 'Certificate only — import its private key to sign',
+                            id.certificates.length > 1 && `Chain of ${id.certificates.length} certificates`,
+                          )}
                         </div>
                       </div>
                       <button

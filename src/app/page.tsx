@@ -4,7 +4,7 @@ import { useCallback, useState, useId } from 'react';
 import { useRouter } from 'next/navigation';
 import { AlertCircle, ArrowUpRight, Heart, Loader2 } from 'lucide-react';
 import { savePdfToStorage } from '@/lib/pdfStorage';
-import { looksLikePdf } from '@/lib/pdfErrors';
+import { looksLikePdf, actionErrorMessage } from '@/lib/pdfErrors';
 import { Logo } from '@/components/art/Logo';
 import { UploadDoodle } from '@/components/art/Illustrations';
 import { CategoryIcon } from '@/components/art/CategoryIcon';
@@ -49,7 +49,7 @@ export default function Home() {
       await savePdfToStorage(buffer, file.name);
       router.push('/editor');
     } catch (e) {
-      setError(`Couldn't open the file: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      setError(actionErrorMessage('Couldn\'t open the file', e));
       setIsLoading(false);
     }
   }, [router]);

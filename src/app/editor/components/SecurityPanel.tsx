@@ -1,5 +1,6 @@
 'use client';
 
+import { plural } from '@/lib/format';
 import { useCallback, useEffect, useState } from 'react';
 import {
   Shield,
@@ -174,11 +175,13 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
         {tab === 'inspect' && report && (
           <>
             <Row label="Encryption" value={report.encrypted ? `${report.handler} / ${report.algorithm ?? '?'}` : 'None'} />
-            <Row label="Revision" value={report.revision != null ? String(report.revision) : '—'} />
+            {report.encrypted && report.revision != null && (
+              <Row label="Security handler" value={`Revision ${report.revision}`} />
+            )}
             <Row label="Metadata" value={report.metadata.hasInfo || report.metadata.hasXmp ? 'Present' : 'Clean'} />
             <Row label="Attachments" value={String(report.embeddedFiles.count)} />
             <Row label="JavaScript" value={report.javascript.present ? 'Detected' : 'None'} warn={report.javascript.present} />
-            <Row label="Integrity" value={report.integrity.ok ? 'OK' : `${report.integrity.issueCount} issue(s)`} warn={!report.integrity.ok} />
+            <Row label="Integrity" value={report.integrity.ok ? 'OK' : plural(report.integrity.issueCount, 'issue')} warn={!report.integrity.ok} />
             <Row label="Redact marks" value={String(report.redactionMarks)} />
 
             <div className="pt-2 space-y-1.5">
@@ -317,7 +320,7 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
               disabled={busy}
               onClick={() => run(async () => {
                 const n = engine.securityEngine.embeddedFiles.removeAllAttachments(doc);
-                return `Removed ${n} attachment(s)`;
+                return n === 0 ? 'No attachments to remove' : `Removed ${plural(n, 'attachment')}`;
               })}
               className="w-full flex items-center justify-center gap-2 rounded-lg bg-panel-elevated hover:bg-panel-elevated/80 py-2 text-app border border-app"
             >

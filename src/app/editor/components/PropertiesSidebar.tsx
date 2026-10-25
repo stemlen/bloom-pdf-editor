@@ -1,4 +1,5 @@
 import React, { MutableRefObject, useEffect, useState } from 'react';
+import { formatPdfDate, joinParts, plural } from '@/lib/format';
 import {
   Type, TextCursorInput, Image, PenTool, Highlighter, Eraser, MousePointer2,
   X, Trash2, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, Minus, Plus, Stamp, Link2,
@@ -1703,8 +1704,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                   >
                     <div className="font-medium truncate">{field.fieldName}</div>
                     <div className="text-[10px] text-app-faint">
-                      {field.signed ? 'Signed' : 'Unsigned'}
-                      {field.hasAppearance ? ' · has /AP' : ''}
+                      {joinParts(field.signed ? 'Signed' : 'Unsigned', field.hasAppearance && 'Visible')}
                     </div>
                   </button>
                 );
@@ -1778,7 +1778,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onChange={(e) => setEnableTimestamp?.(e.target.checked)}
                 className="rounded border-app"
               />
-              Request RFC 3161 timestamp (TSA)
+              Add a trusted timestamp
             </label>
           </div>
 
@@ -1812,7 +1812,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                   </span>
                 </div>
                 <div className="text-[10px] text-app-faint">
-                  {validationReport.signatures.length} signature(s) · {validationReport.revisionCount} revision(s)
+                  {joinParts(plural(validationReport.signatures.length, 'signature'), plural(validationReport.revisionCount, 'revision'))}
                 </div>
                 {validationReport.signatures.map((s) => (
                   <div key={s.fieldId} className="text-[10px] border-t border-app pt-1">
@@ -1840,7 +1840,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               onClick={onEnableLtv}
               className="w-full py-1.5 rounded-md bg-panel-elevated border border-app hover:bg-panel-elevated/80 text-app text-[11px] font-semibold"
             >
-              Enable LTV (embed DSS)
+              Enable long-term validation
             </button>
             {ltvStatus && (
               <p className="text-[10px] text-app-faint">{ltvStatus.summary}</p>
@@ -1863,8 +1863,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                     #{m.index + 1} {m.signerName || m.field.fieldName}
                   </div>
                   <div className="text-[10px] text-app-faint truncate">
-                    {m.signingTime || 'No time'} · {m.reason || 'No reason'}
-                    {m.validation ? ` · ${m.validation.status}` : ''}
+                    {joinParts(m.signingTime ? formatPdfDate(m.signingTime) : 'No signing time', m.reason || 'No reason given', m.validation?.status)}
                   </div>
                 </button>
               ))}
@@ -1872,10 +1871,10 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 <div className="text-[10px] text-app-faint space-y-0.5">
                   {revisionEntries.map((r) => (
                     <div key={r.revision.index}>
-                      Rev {r.revision.index + 1}: xref @{r.revision.xrefOffset}
-                      {r.signatureFieldIds.length
-                        ? ` · ${r.signatureFieldIds.length} sig`
-                        : ''}
+                      {joinParts(
+                        `Revision ${r.revision.index + 1}`,
+                        r.signatureFieldIds.length > 0 && plural(r.signatureFieldIds.length, 'signature'),
+                      )}
                     </div>
                   ))}
                 </div>

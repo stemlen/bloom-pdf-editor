@@ -117,7 +117,7 @@ export function getLtvStatus(doc: PDFDocumentData): LtvStatus {
       ocspCount: 0,
       crlCount: 0,
       offlineReady: false,
-      summary: 'LTV not enabled — embed DSS to validate offline',
+      summary: 'Long-term validation is off. Turn it on so the signature can be checked offline later.',
     };
   }
 
@@ -129,10 +129,11 @@ export function getLtvStatus(doc: PDFDocumentData): LtvStatus {
     crlCount: summary.crlCount,
     offlineReady,
     summary: offlineReady
-      ? `LTV ready — ${summary.certCount} cert(s)` +
-        (summary.ocspCount ? `, ${summary.ocspCount} OCSP` : '') +
-        (summary.crlCount ? `, ${summary.crlCount} CRL` : '')
-      : 'DSS present but empty',
+      ? `Long-term validation is on: ${summary.certCount} ${summary.certCount === 1 ? 'certificate' : 'certificates'}` +
+        (summary.ocspCount ? `, ${summary.ocspCount} ${summary.ocspCount === 1 ? 'status response' : 'status responses'}` : '') +
+        (summary.crlCount ? `, ${summary.crlCount} ${summary.crlCount === 1 ? 'revocation list' : 'revocation lists'}` : '') +
+        ' embedded.'
+      : 'Long-term validation data is present but empty.',
   };
 }
 

@@ -222,8 +222,8 @@ test.describe("signatures", () => {
     await dialog.getByRole("button", { name: "Done" }).click();
     await page.getByRole("button", { name: "Digitally sign document" }).click();
     await expect(page.getByText("#1 Bloom Test Signer")).toBeVisible({ timeout: 30_000 });
-    await page.getByRole("button", { name: "Enable LTV (embed DSS)" }).click();
-    await expect(page.getByText(/LTV not enabled/)).toHaveCount(0);
+    await page.getByRole("button", { name: "Enable long-term validation" }).click();
+    await expect(page.getByText(/Long-term validation is off/)).toHaveCount(0);
     const { bytes } = await downloadPdf(page);
     expect(Buffer.from(bytes).toString("latin1")).toContain("/DSS");
   });
