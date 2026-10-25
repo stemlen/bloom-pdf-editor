@@ -211,11 +211,11 @@ export function ExportPanel({
 
   const handleConvertExport = useCallback(async () => {
     if (!getPdfBytes) {
-      setExportError('PDF bytes unavailable — reload the document and try again.');
+      setExportError("The document couldn't be read. Reload it and try again.");
       return;
     }
     if (engineOnline === false) {
-      setExportError('Convert API unavailable — restart the Next.js app (npm run dev).');
+      setExportError("Document conversion isn't available right now. Reload the page and try again.");
       return;
     }
 

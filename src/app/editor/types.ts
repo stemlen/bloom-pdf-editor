@@ -30,6 +30,21 @@ export const TOOLS: ToolDef[] = [
   { id: 'security',  label: 'Security',  icon: SecurityToolIcon,  shortcut: 'X' },
 ];
 
+/** Display name for every tool, including modes that have no toolbar button. */
+export const TOOL_LABELS: Record<EditorTool, string> = {
+  select: 'Select',
+  text: 'Edit Text',
+  addtext: 'Add Text Box',
+  highlight: 'Highlight',
+  draw: 'Draw',
+  erase: 'Erase',
+  watermark: 'Watermark',
+  redact: 'Redact',
+  sign: 'Sign',
+  link: 'Link',
+  security: 'Security',
+};
+
 export type PathType = 'draw' | 'highlight';
 
 /** Sub-modes for the Draw tool */

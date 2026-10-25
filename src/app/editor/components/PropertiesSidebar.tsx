@@ -3,7 +3,7 @@ import {
   Type, TextCursorInput, Image, PenTool, Highlighter, Eraser, MousePointer2,
   X, Trash2, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, Minus, Plus, Stamp, Link2,
   PenLine, Star, Copy, Lock, Unlock, RotateCw, KeyRound, ShieldCheck,
-  ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles,
+  ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles, ScanText,
 } from 'lucide-react';
 import type { DrawMode, EditorTool, RemovedImageRecord } from '../types';
 import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry, WatermarkPosition } from '@/engine';
@@ -81,6 +81,8 @@ interface PropertiesSidebarProps {
   onFlattenForms?: () => void;
   /** Duplicate the selected/editing text line one row below (table-like). */
   onDuplicateLineBelow?: () => void;
+  /** Run OCR on the current page and insert the recognized text. */
+  onRecognizeText?: () => void;
   /** Active cell inside an auto-detected PDF table. */
   tableInfo?: { rows: number; cols: number; row: number; col: number } | null;
   onAddTableRow?: () => void;
@@ -187,6 +189,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
     formFields = [], selectedFormField, formFieldDraft = '',
     onFormFieldSelect, onFormFieldChange, onFlattenForms,
     onDuplicateLineBelow,
+  onRecognizeText,
     tableInfo = null,
     onAddTableRow,
     onAddTableColumn,
@@ -597,6 +600,17 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               <TextCursorInput size={14} />
               Add Text Box
             </button>
+            {onRecognizeText && (
+              <button
+                type="button"
+                onClick={onRecognizeText}
+                className="w-full flex items-center justify-center gap-2 py-2 bg-panel-elevated hover:bg-panel-elevated/80 text-app rounded-md transition-colors text-xs font-semibold border border-app"
+                title="Recognize text on this page with OCR, for scanned pages"
+              >
+                <ScanText size={14} />
+                Recognize Text (OCR)
+              </button>
+            )}
             {onDuplicateLineBelow && selectedRun && (
               <button
                 onClick={onDuplicateLineBelow}

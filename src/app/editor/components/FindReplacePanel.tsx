@@ -47,6 +47,8 @@ export function FindReplacePanel({
     }
   };
 
+  const noMatches = findText.trim() !== '' && matchCount === 0;
+
   return (
     <div className="p-3 space-y-2.5 bg-popover backdrop-blur-md rounded-xl border border-border shadow-2xl w-full md:w-72 font-sans">
       {/* Header */}
@@ -73,16 +75,16 @@ export function FindReplacePanel({
             value={findText}
             onChange={(e) => onFindTextChange(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Search text in PDF..."
+            placeholder="Search text in PDF…"
             autoFocus
-            className="w-full bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary rounded-lg pl-2.5 pr-20 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none transition-all"
+            className={`w-full bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary rounded-lg pl-2.5 ${noMatches ? 'pr-36' : 'pr-24'} py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none transition-all`}
           />
 
           <div className="absolute right-1 flex items-center gap-0.5">
             {/* Match Counter Badge */}
             {findText.trim() !== '' && (
-              <span data-testid="match-count" className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-muted text-foreground/90 mr-1">
-                {matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : '0'}
+              <span data-testid="match-count" className="text-[10px] font-mono whitespace-nowrap px-1.5 py-0.5 rounded bg-muted text-foreground/90 mr-1">
+                {matchCount > 0 ? `${currentMatchIndex + 1}/${matchCount}` : 'No matches'}
               </span>
             )}
 
@@ -125,7 +127,7 @@ export function FindReplacePanel({
         <input
           value={replaceText}
           onChange={(e) => onReplaceTextChange(e.target.value)}
-          placeholder="Replace with..."
+          placeholder="Replace with…"
           className="w-full bg-muted border border-border focus:border-primary focus:ring-1 focus:ring-primary rounded-lg px-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none transition-all"
         />
       </div>

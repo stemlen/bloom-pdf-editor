@@ -293,6 +293,10 @@ function cssFontFamilyFromUI(name: string): string {
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
+
+/** Style a new text box starts with. */
+const DEFAULT_TEXT_STYLE = { fontFamily: 'Helvetica', fontSize: 12, color: '#000000' } as const;
+
 export default function EditorPage() {
   const router = useRouter();
 
@@ -496,9 +500,11 @@ export default function EditorPage() {
     setCanRedo(historyRef.current.canRedo());
   }, []);
 
-  const [textFontFamily, setTextFontFamily] = useState('Helvetica');
-  const [textFontSize, setTextFontSize] = useState(12);
-  const [textColor, setTextColor] = useState('#000000');
+  const [textFontFamily, setTextFontFamily] = useState<string>(DEFAULT_TEXT_STYLE.fontFamily);
+  const [textFontSize, setTextFontSize] = useState<number>(DEFAULT_TEXT_STYLE.fontSize);
+  const [textColor, setTextColor] = useState<string>(DEFAULT_TEXT_STYLE.color);
+  /** Floating text box that should take keyboard focus once it mounts. */
+  const focusFloatingTextIdRef = useRef<string | null>(null);
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
   const [textUnderline, setTextUnderline] = useState(false);
@@ -1073,7 +1079,12 @@ export default function EditorPage() {
     }
 
     generateThumbnails();
-    return () => { cancelled = true; };
+    return () => {
+      // A superseded run must not leave the spinner on (e.g. when a restored
+      // session swaps the document while thumbnails are still rendering).
+      cancelled = true;
+      setIsGeneratingThumbnails(false);
+    };
   }, [doc, thumbnailKey]);
 
   // Reset edit state when doc or page changes. Both change from many places
@@ -2729,18 +2740,29 @@ export default function EditorPage() {
       if (!doc || !renderResult) return;
       const page = doc.pages[currentPage];
 
+      // A new box always starts from the default style, not whatever was last
+      // used on another line; the sidebar is reset to match it.
       const newBox: FloatingText = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: Math.random().toString(36).slice(2, 11),
         pdfX,
         pdfY,
-        text: 'New Text',
-        fontSize: textFontSize,
-        fontFamily: textFontFamily,
-        color: textColor,
+        text: 'New text',
+        fontSize: DEFAULT_TEXT_STYLE.fontSize,
+        fontFamily: DEFAULT_TEXT_STYLE.fontFamily,
+        color: DEFAULT_TEXT_STYLE.color,
       };
+      setTextFontSize(DEFAULT_TEXT_STYLE.fontSize);
+      setTextFontFamily(DEFAULT_TEXT_STYLE.fontFamily);
+      setTextColor(DEFAULT_TEXT_STYLE.color);
+      setTextBold(false);
+      setTextItalic(false);
+      setTextUnderline(false);
+      setTextAlign('left');
 
+      focusFloatingTextIdRef.current = newBox.id;
       setFloatingTexts(prev => [...prev, newBox]);
       setActiveFloatingTextId(newBox.id);
+      setIsDirty(true);
       setActiveTool('text');
 
     } else if (activeTool === 'highlight') {
@@ -5174,9 +5196,9 @@ export default function EditorPage() {
       if (focusedTag === 'INPUT' || focusedTag === 'TEXTAREA' || focusedTag === 'SELECT') return;
       if ((document.activeElement as HTMLElement | null)?.isContentEditable) return;
 
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') {
         e.preventDefault(); goToPrev();
-      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'PageDown') {
         e.preventDefault(); goToNext();
       } else if (e.key === '+' || e.key === '=') {
         if (e.metaKey || e.ctrlKey) { e.preventDefault(); zoomIn(); }
@@ -5530,6 +5552,7 @@ export default function EditorPage() {
       {/* ── Top toolbar ── */}
       <Toolbar
         fileName={fileName}
+        isDirty={isDirty}
         currentPage={currentPage}
         totalPages={totalPages}
         scale={scale}
@@ -5719,6 +5742,7 @@ export default function EditorPage() {
           onFormFieldChange={handleFormFieldChange}
           onFlattenForms={handleFlattenForms}
           onDuplicateLineBelow={handleDuplicateLineBelow}
+          onRecognizeText={() => void handleRecognizeText()}
           tableInfo={selectedTableCell ? {
             rows: selectedTableCell.table.rows,
             cols: selectedTableCell.table.cols,
@@ -5839,12 +5863,12 @@ export default function EditorPage() {
               <div className="pointer-events-auto flex items-center justify-between gap-2 bg-popover backdrop-blur-md px-3 py-2 rounded-xl border border-border shadow-lg w-full md:w-72">
                 <button
                   onClick={() => void handleRecognizeText()}
+                  data-testid="search-ocr-button"
                   className="flex items-center gap-2 text-xs font-semibold text-foreground/90 hover:text-primary transition-colors"
-                  title="OCR recognize text"
+                  title="Recognize text on this page with OCR, for scanned pages"
                 >
-                  <Type size={14} /> Recognize text (OCR)
+                  <Type size={14} /> Recognize Text (OCR)
                 </button>
-                {isDirty && <span data-testid="unsaved-badge" className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold border-l border-border pl-2">Unsaved</span>}
               </div>
               <div className="pointer-events-auto">
                 <FindReplacePanel
@@ -5869,7 +5893,7 @@ export default function EditorPage() {
           {isRendering && (
             <div className="absolute top-4 right-4 z-30 bg-popover backdrop-blur border border-border shadow-lg rounded-full px-4 py-2 flex items-center gap-2 text-foreground/90 text-sm font-medium animate-in slide-in-from-top-4 fade-in">
               <Loader2 size={16} className="animate-spin text-primary" />
-              Rendering...
+              Rendering…
             </div>
           )}
 
@@ -6146,6 +6170,16 @@ export default function EditorPage() {
                     </button>
                   )}
                   <textarea
+                    ref={(el) => {
+                      // Focus a just-created box so typing goes into it instead
+                      // of triggering tool shortcuts.
+                      if (el && focusFloatingTextIdRef.current === ft.id) {
+                        focusFloatingTextIdRef.current = null;
+                        el.focus();
+                        el.select();
+                      }
+                    }}
+                    aria-label="Text box"
                     value={ft.text}
                     onChange={(e) => {
                       setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text: e.target.value } : p));

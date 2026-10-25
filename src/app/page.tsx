@@ -55,7 +55,7 @@ export default function Home() {
       {/* ── Header (mirrors bloompdf.app) ── */}
       <header className="sticky top-0 z-50 h-[58px] bg-background/85 backdrop-blur-xl border-b border-border">
         <div className="max-w-screen-xl mx-auto h-full px-4 sm:px-6 flex items-center gap-3">
-          <a href={SITE_URL} aria-label="BloomPDF home" className="flex items-center flex-shrink-0 -ml-2 sm:-ml-1 mr-2 sm:mr-4 overflow-visible">
+          <a href={SITE_URL} target="_blank" rel="noopener noreferrer" aria-label="BloomPDF home (opens in a new tab)" className="flex items-center flex-shrink-0 -ml-2 sm:-ml-1 mr-2 sm:mr-4 overflow-visible">
             <Logo variant="nav" />
           </a>
           <span className="hidden sm:inline-flex items-center h-7 px-2.5 rounded-full bg-primary/10 text-primary text-[12px] font-semibold">
@@ -64,6 +64,9 @@ export default function Home() {
           <div className="flex-1" />
           <a
             href={SITE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="All PDF tools (opens in a new tab)"
             className="h-9 px-3 inline-flex items-center gap-1 rounded-lg text-[13.5px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/70 transition-colors"
           >
             <span className="hidden sm:inline">All PDF tools</span>
@@ -185,7 +188,7 @@ export default function Home() {
               <div key={f.title} className="rounded-2xl border border-border bg-card p-5 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.06)]">
                 <CategoryIcon id={f.cat} size={18} tile />
                 <h2 className="mt-3 text-[15px] font-bold">{f.title}</h2>
-                <p className="mt-1 text-[13.5px] leading-relaxed text-muted-foreground">{f.body}</p>
+                <p className="mt-1 text-[13.5px] leading-relaxed text-muted-foreground text-pretty">{f.body}</p>
               </div>
             ))}
           </div>

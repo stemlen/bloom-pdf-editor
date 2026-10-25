@@ -9,6 +9,8 @@ import { ThemeToggle } from '@/components/layout/ThemeToggle';
 
 interface ToolbarProps {
   fileName: string;
+  /** True when there are edits that have not been downloaded yet. */
+  isDirty?: boolean;
   currentPage: number;
   totalPages: number;
   scale: number;
@@ -39,6 +41,7 @@ interface ToolbarProps {
 
 export function Toolbar({
   fileName,
+  isDirty = false,
   currentPage,
   totalPages,
   scale,
@@ -83,6 +86,16 @@ export function Toolbar({
         </Link>
         <div className="w-px h-5 bg-border hidden lg:block shrink-0" />
         <span className="hidden lg:inline text-foreground/90 font-semibold text-[13px] truncate max-w-[220px]" title={fileName}>{fileName}</span>
+        {isDirty && (
+          <span
+            data-testid="unsaved-badge"
+            className="inline-flex items-center gap-1 h-6 px-2 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 text-[11px] font-semibold whitespace-nowrap shrink-0"
+            title="You have changes that haven't been downloaded yet"
+          >
+            <span aria-hidden className="w-1.5 h-1.5 rounded-full bg-current" />
+            Unsaved
+          </span>
+        )}
       </div>
 
       {/* ── Center: undo/redo, page nav, zoom ── */}

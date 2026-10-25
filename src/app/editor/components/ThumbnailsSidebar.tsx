@@ -307,7 +307,7 @@ export function ThumbnailsSidebar({
           {isGeneratingThumbnails && thumbnails.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 gap-3 text-app-faint">
               <Loader2 size={20} className="animate-spin" />
-              <span className="text-[10px] font-medium">Generating...</span>
+              <span className="text-[10px] font-medium">Generating thumbnails…</span>
             </div>
           ) : (
             thumbnails.map((thumbDataUrl, i) => {

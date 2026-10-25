@@ -30,7 +30,7 @@ test("find text across pages, replace one match, then replace all", async ({ pag
   await find.fill("Bloom");
   await page.getByPlaceholder("Replace with...").fill("Blossom");
   await page.getByRole("button", { name: "Replace All" }).click();
-  await expect(count).toHaveText("0");
+  await expect(count).toHaveText("No matches");
   await expect(page.getByTestId("unsaved-badge")).toBeVisible();
 
   const { bytes } = await downloadPdf(page);
@@ -62,7 +62,7 @@ test("OCR adds a searchable text layer", async ({ page }) => {
   await expect(page.getByTestId("match-count")).toHaveText("1/1");
   // Needs the tesseract.js worker + English data from the jsDelivr CDN.
   const ocrLog = page.waitForEvent("console", { predicate: (m) => /\[OCR\] Inserted/.test(m.text()), timeout: 150_000 });
-  await page.getByTitle("OCR recognize text").click();
+  await page.getByTestId("search-ocr-button").click();
   await ocrLog;
   await expect(page.getByTestId("unsaved-badge")).toBeVisible();
   // The recognised words are now a second, invisible text layer.
