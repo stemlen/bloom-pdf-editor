@@ -1588,7 +1588,110 @@ export function duplicateTableRowBelow(
   for (const line of rowLines) {
     bytes = duplicateLineBelow(bytes, line, dy);
   }
-  return bytes;
+  const baseline = Math.min(...rowLines.map(l => l.baseline));
+  return shiftTablePathsForNewRow(bytes, baseline, -dy);
+}
+
+const PATH_BUILD_OPS = new Set(['m', 'l', 'c', 'v', 'y', 'h', 're']);
+const PATH_PAINT_OPS = new Set(['S', 's', 'f', 'F', 'f*', 'B', 'B*', 'b', 'b*', 'n']);
+
+type Ctm = [number, number, number, number, number, number];
+const mulCtm = (m: Ctm, n: Ctm): Ctm => [
+  m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3],
+  m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3],
+  m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5],
+];
+
+/**
+ * Make a table's borders and cell backgrounds follow a row inserted below
+ * the row on `baseline` (BE-103). Paths below the row move down by `pitch`,
+ * paths inside the row are copied one pitch lower (backgrounds, the row's
+ * borders), and grid lines that run through the row get longer.
+ */
+export function shiftTablePathsForNewRow(contentBytes: Uint8Array, baseline: number, pitch: number): Uint8Array {
+  const instructions = parseContentStream(contentBytes);
+  const num = (o: PDFObject | undefined) => (o instanceof PDFNumber ? o.value : 0);
+
+  type Block = { start: number; end: number; ctm: Ctm; ys: number[]; clip: boolean };
+  const blocks: Block[] = [];
+  const stack: Ctm[] = [];
+  let ctm: Ctm = [1, 0, 0, 1, 0, 0];
+  let start = -1;
+  let clip = false;
+  for (let i = 0; i < instructions.length; i++) {
+    const { operator: o, operands } = instructions[i];
+    if (o === 'q') stack.push(ctm);
+    else if (o === 'Q') ctm = stack.pop() ?? ctm;
+    else if (o === 'cm' && operands.length >= 6) ctm = mulCtm(operands.slice(0, 6).map(num) as Ctm, ctm);
+    else if (PATH_BUILD_OPS.has(o)) { if (start < 0) start = i; }
+    else if (o === 'W' || o === 'W*') clip = true;
+    else if (PATH_PAINT_OPS.has(o)) {
+      if (start >= 0) {
+        const ys: number[] = [];
+        for (let j = start; j < i; j++) {
+          const ins = instructions[j];
+          const v = ins.operands.map(num);
+          const pts: [number, number][] = ins.operator === 're'
+            ? [[v[0], v[1]], [v[0] + v[2], v[1] + v[3]]]
+            : ins.operator === 'h' ? [] : Array.from({ length: v.length / 2 }, (_, k) => [v[2 * k], v[2 * k + 1]] as [number, number]);
+          for (const [x, y] of pts) ys.push(ctm[1] * x + ctm[3] * y + ctm[5]);
+        }
+        if (o !== 'n' && ys.length > 0) blocks.push({ start, end: i, ctm, ys, clip });
+      }
+      start = -1;
+      clip = false;
+    }
+  }
+
+  // The row's bottom border: the nearest horizontal edge below the baseline.
+  const eps = 0.5;
+  const edges = blocks.flatMap(b => b.ys).filter(y => y < baseline && y > baseline - pitch);
+  const rowBottom = edges.length > 0 ? Math.max(...edges) : baseline - pitch * 0.3;
+  const rowTop = rowBottom + pitch;
+
+  const shiftOps = (ctmAt: Ctm, block: CSInstruction[]): CSInstruction[] => {
+    // Translate by −pitch in page space, expressed in the block's local space.
+    const det = ctmAt[0] * ctmAt[3] - ctmAt[1] * ctmAt[2];
+    if (Math.abs(det) < 1e-9) return block;
+    const tx = (ctmAt[2] * pitch) / det;
+    const ty = (-ctmAt[0] * pitch) / det;
+    return [op('q'), op('cm', [1, 0, 0, 1, tx, ty].map(n => new PDFNumber(n))), ...block, op('Q')];
+  };
+
+  let changed = false;
+  for (let k = blocks.length - 1; k >= 0; k--) {
+    const b = blocks[k];
+    if (b.clip) continue;
+    const top = Math.max(...b.ys);
+    const bottom = Math.min(...b.ys);
+    const block = instructions.slice(b.start, b.end + 1);
+    if (top <= rowBottom + eps) {
+      instructions.splice(b.start, block.length, ...shiftOps(b.ctm, block));
+      changed = true;
+    } else if (bottom >= rowBottom - eps && top <= rowTop + eps) {
+      const copy = block.map(ins => ({ ...ins, operands: [...ins.operands] }));
+      instructions.splice(b.end + 1, 0, ...shiftOps(b.ctm, copy));
+      changed = true;
+    } else if (bottom < rowBottom - eps && b.ctm[1] === 0 && b.ctm[2] === 0 && b.ctm[3] !== 0) {
+      // Grid line through the row: move its lower end(s) down.
+      const d = b.ctm[3];
+      const f = b.ctm[5];
+      const lower = (yl: number) => (d * yl + f <= rowBottom + eps ? yl - pitch / d : yl);
+      for (let j = b.start; j < b.end; j++) {
+        const ins = instructions[j];
+        if (ins.operator === 're') {
+          const v = ins.operands.map(num);
+          const y0 = lower(v[1]);
+          const y1 = lower(v[1] + v[3]);
+          ins.operands = [v[0], y0, v[2], y1 - y0].map(n => new PDFNumber(n));
+        } else if (ins.operator !== 'h') {
+          ins.operands = ins.operands.map((o, idx) => (idx % 2 === 1 ? new PDFNumber(lower(num(o))) : o));
+        }
+      }
+      changed = true;
+    }
+  }
+  return changed ? compileInstructions(instructions) : contentBytes;
 }
 
 /** Text placed in each cell of a column added with Add Column Right. */
