@@ -6871,7 +6871,7 @@ export default function EditorPage() {
           <div role="dialog" aria-label="Watermark applied" className="bg-popover border border-border rounded-2xl p-6 shadow-2xl max-w-sm w-full text-center animate-scale-in">
             <h3 className="text-foreground font-bold text-lg mb-4">Watermark applied</h3>
             <p className="text-muted-foreground text-sm mb-6 leading-relaxed">
-              Watermark has been applied and live preview is off. To add more watermarks, turn on the live preview to preview it live.
+              The watermark has been applied and Live Preview is off. To add another watermark, turn Live Preview back on.
             </p>
             <button
               onClick={() => setShowApplySuccessModal(false)}

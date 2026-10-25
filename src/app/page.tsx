@@ -2,7 +2,7 @@
 
 import { useCallback, useState, useId } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertCircle, ArrowUpRight, Loader2 } from 'lucide-react';
+import { AlertCircle, ArrowUpRight, Heart, Loader2 } from 'lucide-react';
 import { savePdfToStorage } from '@/lib/pdfStorage';
 import { looksLikePdf } from '@/lib/pdfErrors';
 import { Logo } from '@/components/art/Logo';
@@ -209,7 +209,7 @@ export default function Home() {
             </a>
           </p>
           <p className="flex items-center gap-1.5">
-            Made with <Lotus size={16} className="text-primary" /> for everyone who just needs their PDF done.
+            Made with <Heart size={14} className="text-primary fill-current shrink-0" role="img" aria-label="love" /> for everyone who just needs their PDF done.
           </p>
         </div>
       </footer>

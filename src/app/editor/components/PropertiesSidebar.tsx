@@ -169,6 +169,14 @@ interface PropertiesSidebarProps {
   isMobile?: boolean;
 }
 
+/** Plain names for PDF form field types (/FT). */
+const FIELD_TYPE_LABELS: Record<string, string> = {
+  Tx: 'Text field',
+  Btn: 'Checkbox, radio or button',
+  Ch: 'Dropdown or list',
+  Sig: 'Signature field',
+};
+
 export function PropertiesSidebar(props: PropertiesSidebarProps) {
   const {
     onClose,
@@ -328,7 +336,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
         {/* Top Bar with Hide Panel Button */}
         {onClose && (
           <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-border text-xs text-muted-foreground">
-            <span className="font-hand text-[19px] leading-none text-primary normal-case">options</span>
+            <span className="font-hand text-[19px] leading-none text-primary normal-case">Options</span>
           <button
             onClick={onClose}
             title="Hide panel"
@@ -479,7 +487,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 <button
                   key={c}
                   type="button"
-                  aria-label={`Text colour ${c}`}
+                  title={`Text color ${c.toUpperCase()}`}
+                  aria-label={`Text color ${c.toUpperCase()}`}
                   aria-pressed={textColor.toLowerCase() === c}
                   onClick={() => setTextColor(c)}
                   onMouseDown={(e) => e.preventDefault()}
@@ -732,8 +741,12 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               {['#ef4444', '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6', '#f4f4f5'].map(color => (
                 <button
                   key={color}
+                  type="button"
+                  title={`Draw color ${color.toUpperCase()}`}
+                  aria-label={`Draw color ${color.toUpperCase()}`}
+                  aria-pressed={drawColor.toLowerCase() === color.toLowerCase()}
                   onClick={() => setDrawColor(color)}
-                  className={`w-6 h-6 rounded-full mx-auto transition-transform ${drawColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-bloom-500 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
+                  className={`w-6 h-6 rounded-full mx-auto border border-black/15 dark:border-white/20 transition-transform ${drawColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-bloom-500 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
                   style={{ backgroundColor: color }}
                 />
               ))}
@@ -794,8 +807,12 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               {['#fffb00', '#00ff00', '#00e5ff', '#ff00ff', '#ff8c00', '#ff6b6b', '#a78bfa', '#67e8f9'].map(color => (
                 <button
                   key={color}
+                  type="button"
+                  title={`Highlight color ${color.toUpperCase()}`}
+                  aria-label={`Highlight color ${color.toUpperCase()}`}
+                  aria-pressed={highlightColor.toLowerCase() === color.toLowerCase()}
                   onClick={() => setHighlightColor(color)}
-                  className={`w-6 h-6 rounded-full mx-auto transition-transform ${highlightColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-amber-400 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
+                  className={`w-6 h-6 rounded-full mx-auto border border-black/15 dark:border-white/20 transition-transform ${highlightColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-amber-400 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
                   style={{ backgroundColor: color }}
                 />
               ))}
@@ -980,7 +997,10 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               <span className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Detected</span>
               <div className="flex gap-3 mt-2">
                 <span className="text-[11px] text-primary">
-                  {displayItems.filter(d => d.type === 'image').length} images
+                  {(() => {
+                    const n = displayItems.filter(d => d.type === 'image').length;
+                    return `${n} ${n === 1 ? 'image' : 'images'}`;
+                  })()}
                 </span>
                 <span className="text-[11px] text-emerald-500">
                   {displayItems.filter(d => d.type === 'path').length} drawings
@@ -1133,7 +1153,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
           <p className="text-[10px] text-app-faint leading-relaxed">
             Click an amber box on the page or a field below to edit its value.
           </p>
-          <div className="space-y-1 max-h-40 overflow-y-auto">
+          <div className="space-y-1 max-h-[min(24rem,50vh)] overflow-y-auto">
             {formFields.map((field) => (
               <button
                 key={field.ref.toKey()}
@@ -1145,7 +1165,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 }`}
               >
                 <div className="font-medium truncate">{field.fieldName || 'Unnamed'}</div>
-                <div className="text-[10px] text-app-faint">{field.fieldType}</div>
+                <div className="text-[10px] text-app-faint">{FIELD_TYPE_LABELS[field.fieldType] ?? 'Field'}</div>
               </button>
             ))}
           </div>
@@ -1204,7 +1224,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
           <div className="p-4 pb-2">
             <div className="flex items-center gap-2 text-[11px] font-bold tracking-wider text-foreground uppercase">
               <Stamp size={14} />
-              Watermark options
+              Watermark Properties
             </div>
           </div>
           
@@ -1239,7 +1259,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               type="button"
               role="switch"
               aria-checked={!!watermarkLivePreview}
-              aria-label="Live preview"
+              aria-label="Live Preview"
               onClick={() => setWatermarkLivePreview?.(!watermarkLivePreview)}
               className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${watermarkLivePreview ? 'bg-primary' : 'bg-panel-elevated border border-app'}`}
             >
@@ -1262,7 +1282,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-[11px] font-medium text-app">Text format:</label>
+                  <label className="text-[11px] font-medium text-app">Font:</label>
                   <select
                     value={watermarkFontName}
                     onChange={(e) => setWatermarkFontName?.(e.target.value)}
@@ -1398,20 +1418,16 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
 
             <div className="flex gap-4">
               <div className="space-y-1.5 flex-1">
-                <label className="text-[11px] font-medium text-app">Transparency:</label>
+                <label className="text-[11px] font-medium text-app" htmlFor="watermark-opacity">Opacity:</label>
                 <select
-                  value={watermarkOpacity === 100 ? 'No transparency' : `${100 - watermarkOpacity}%`}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === 'No transparency') setWatermarkOpacity?.(100);
-                    else setWatermarkOpacity?.(100 - parseInt(val));
-                  }}
+                  id="watermark-opacity"
+                  value={String(watermarkOpacity)}
+                  onChange={(e) => setWatermarkOpacity?.(parseInt(e.target.value, 10))}
                   className="w-full bg-panel-elevated border border-app rounded px-2 py-2 text-[11px] text-app outline-none focus:border-primary transition-colors appearance-none cursor-pointer"
                 >
-                  <option value="No transparency">No transparency</option>
-                  <option value="25%">25%</option>
-                  <option value="50%">50%</option>
-                  <option value="75%">75%</option>
+                  {[100, 75, 50, 25].map(v => (
+                    <option key={v} value={String(v)}>{v === 100 ? '100% (solid)' : `${v}%`}</option>
+                  ))}
                 </select>
               </div>
               <div className="space-y-1.5 flex-1">
@@ -1441,7 +1457,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onChange={(e) => setWatermarkBlendMode?.(e.target.value)}
                 className="w-full bg-panel-elevated border border-app rounded px-2 py-2 text-[11px] text-app outline-none focus:border-primary transition-colors appearance-none cursor-pointer"
               >
-                <option value="Normal">Normal (source-over)</option>
+                <option value="Normal">Normal</option>
                 <option value="Multiply">Multiply</option>
                 <option value="Screen">Screen</option>
                 <option value="Overlay">Overlay</option>
