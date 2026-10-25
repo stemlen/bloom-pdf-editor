@@ -1476,6 +1476,21 @@ export default function EditorPage() {
     if ((activeTool === 'select' || activeTool === 'text') && displayItems.length > 0 && !editingLine) {
       ctx.save();
       ctx.scale(dpr, dpr);
+      // Display items are in unrotated page space; turn the overlay the same
+      // way the renderer turns the page so boxes line up on /Rotate pages
+      // instead of streaking across them (BE-208).
+      const pageRotate = ((doc.pages[currentPage].rotate % 360) + 360) % 360;
+      const unrotatedHeight = pageRotate === 90 || pageRotate === 270 ? renderResult.pageWidth : renderResult.pageHeight;
+      if (pageRotate === 90) {
+        ctx.translate(renderResult.pageWidth * scale, 0);
+        ctx.rotate(Math.PI / 2);
+      } else if (pageRotate === 180) {
+        ctx.translate(renderResult.pageWidth * scale, renderResult.pageHeight * scale);
+        ctx.rotate(Math.PI);
+      } else if (pageRotate === 270) {
+        ctx.translate(0, renderResult.pageHeight * scale);
+        ctx.rotate(-Math.PI / 2);
+      }
 
       for (const item of displayItems) {
         const isImage = item.type === 'image';
@@ -1483,11 +1498,11 @@ export default function EditorPage() {
 
         const topLeft = pdfToCanvas(
           item.x, item.y + item.height,
-          scale, renderResult.pageHeight, mediaBox.x, mediaBox.y,
+          scale, unrotatedHeight, mediaBox.x, mediaBox.y,
         );
         const bottomRight = pdfToCanvas(
           item.x + item.width, item.y,
-          scale, renderResult.pageHeight, mediaBox.x, mediaBox.y,
+          scale, unrotatedHeight, mediaBox.x, mediaBox.y,
         );
 
         const boxX = topLeft.cssX;
