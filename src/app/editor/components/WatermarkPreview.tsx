@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { PDFDocumentData } from '@/engine';
+import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
 
 interface WatermarkPreviewProps {
   doc: PDFDocumentData | null;
@@ -52,9 +53,14 @@ export function WatermarkPreview({
   const pageWidth = isRotated ? page.mediaBox.height : page.mediaBox.width;
   const pageHeight = isRotated ? page.mediaBox.width : page.mediaBox.height;
   const opacity = watermarkOpacity / 100;
-  const fontSizeCss = (72 * (watermarkSize / 100)) * scale;
-  const imgWidthCss = watermarkImageDims?.width ? (watermarkImageDims.width * (watermarkSize / 100)) * scale : 0;
-  const imgHeightCss = watermarkImageDims?.height ? (watermarkImageDims.height * (watermarkSize / 100)) * scale : 0;
+  // A single watermark larger than the page is shrunk to fit (the editor
+  // applies the same factor when saving, so preview and output match).
+  const natural = watermarkNaturalSize(watermarkType, watermarkText, watermarkSize, watermarkImageDims, watermarkShapeType);
+  const fit = watermarkMosaic ? 1 : watermarkFitScale(natural.width, natural.height, watermarkRotation, pageWidth, pageHeight);
+  const sizePercent = watermarkSize * fit;
+  const fontSizeCss = (72 * (sizePercent / 100)) * scale;
+  const imgWidthCss = watermarkImageDims?.width ? (watermarkImageDims.width * (sizePercent / 100)) * scale : 0;
+  const imgHeightCss = watermarkImageDims?.height ? (watermarkImageDims.height * (sizePercent / 100)) * scale : 0;
   const padCss = 30 * scale;
 
   const textWidthCss = (watermarkText.length * (fontSizeCss / scale) * 0.5 * scale);

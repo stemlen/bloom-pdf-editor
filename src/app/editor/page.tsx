@@ -41,6 +41,7 @@ import { SignatureOverlay } from './components/signatures/SignatureOverlay';
 import { SignatureCreateDialog, type SignatureCreateResult } from './components/signatures/SignatureCreateDialog';
 import { CertificateImportDialog } from './components/signatures/CertificateImportDialog';
 import { WatermarkPreview } from './components/WatermarkPreview';
+import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
 import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
 import { FindReplacePanel } from './components/FindReplacePanel';
@@ -4671,6 +4672,24 @@ export default function EditorPage() {
         pageIndices.push(i);
       }
 
+      // Shrink a single oversized watermark to fit the smallest target page,
+      // exactly as the preview does (BE-314).
+      let fittedSize = watermarkSize;
+      if (!watermarkMosaic) {
+        const natural = watermarkNaturalSize(watermarkType, watermarkText, watermarkSize, watermarkImageDims, watermarkShapeType);
+        let fit = 1;
+        for (const idx of pageIndices) {
+          const pg = doc.pages[idx];
+          if (!pg) continue;
+          const rot = ((pg.rotate % 360) + 360) % 360;
+          const sideways = rot === 90 || rot === 270;
+          const pw = sideways ? pg.mediaBox.height : pg.mediaBox.width;
+          const ph = sideways ? pg.mediaBox.width : pg.mediaBox.height;
+          fit = Math.min(fit, watermarkFitScale(natural.width, natural.height, watermarkRotation, pw, ph));
+        }
+        fittedSize = watermarkSize * fit;
+      }
+
       if (watermarkType === 'text') {
         const r = parseInt(watermarkColor.slice(1, 3), 16) / 255;
         const g = parseInt(watermarkColor.slice(3, 5), 16) / 255;
@@ -4687,7 +4706,7 @@ export default function EditorPage() {
           tile: watermarkMosaic,
           layer: watermarkLayer,
           fontName: watermarkFontName,
-          fontSize: Math.round(72 * (watermarkSize / 100)),
+          fontSize: Math.max(1, Math.round(72 * (fittedSize / 100))),
           position: watermarkPosition,
           pageIndices
         };
@@ -4700,7 +4719,7 @@ export default function EditorPage() {
         const sg = parseInt(watermarkShapeColor.slice(3, 5), 16) / 255;
         const sb = parseInt(watermarkShapeColor.slice(5, 7), 16) / 255;
 
-        const fontSizePt = Math.round(72 * (watermarkSize / 100));
+        const fontSizePt = Math.max(1, Math.round(72 * (fittedSize / 100)));
         const textWidth = watermarkText.length * fontSizePt * 0.5;
 
         let finalWidth = textWidth + 40;
@@ -4743,8 +4762,8 @@ export default function EditorPage() {
           type: 'image',
           imageBytes: watermarkImageBytes,
           mimeType,
-          width: watermarkImageDims.width * (watermarkSize / 100),
-          height: watermarkImageDims.height * (watermarkSize / 100),
+          width: watermarkImageDims.width * (fittedSize / 100),
+          height: watermarkImageDims.height * (fittedSize / 100),
           opacity: watermarkOpacity / 100,
           blendMode: watermarkBlendMode,
           rotation: watermarkRotation,
