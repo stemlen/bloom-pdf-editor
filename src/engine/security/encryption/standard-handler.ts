@@ -84,14 +84,19 @@ export function computeFileKeyR2R4(
   fileId: FileIdPair,
 ): Uint8Array {
   const keyLen = keyByteLength(enc);
-  let hash = md5(padPassword(password));
 
-  // Build input for next MD5: hash || O || P || ID[0] [|| FFFFFFFF]
-  const parts: Uint8Array[] = [hash, enc.O, int32LE(enc.P), fileId.permanent];
+  // A single MD5 over: padded password || O (32 bytes) || P (int32 LE) || ID[0]
+  // [|| FFFFFFFF when R4 and metadata is not encrypted].
+  const parts: Uint8Array[] = [
+    padPassword(password),
+    enc.O.subarray(0, 32),
+    int32LE(enc.P),
+    fileId.permanent,
+  ];
   if (enc.revision >= 4 && !enc.encryptMetadata) {
     parts.push(new Uint8Array([0xff, 0xff, 0xff, 0xff]));
   }
-  hash = md5(concatBytes(...parts));
+  let hash = md5(concatBytes(...parts));
 
   if (enc.revision >= 3) {
     for (let i = 0; i < 50; i++) {

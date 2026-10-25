@@ -80,8 +80,10 @@ export function parseEncryptDict(
     cryptFilters.set('StdCF', { name: 'StdCF', method, length: length / 8 });
   }
 
-  const stmF = dict.getName('StmF') ?? (version >= 4 ? 'StdCF' : 'Identity');
-  const strF = dict.getName('StrF') ?? (version >= 4 ? 'StdCF' : 'Identity');
+  // Crypt filters only exist from V4. Below that, every string and stream is
+  // encrypted with the file key, which we model as the standard filter.
+  const stmF = version >= 4 ? dict.getName('StmF') ?? 'StdCF' : 'StdCF';
+  const strF = version >= 4 ? dict.getName('StrF') ?? 'StdCF' : 'StdCF';
   const eff = dict.getName('EFF') ?? stmF;
 
   return {
