@@ -4,6 +4,7 @@ import { useCallback, useState, useId } from 'react';
 import { useRouter } from 'next/navigation';
 import { AlertCircle, ArrowUpRight, Loader2 } from 'lucide-react';
 import { savePdfToStorage } from '@/lib/pdfStorage';
+import { looksLikePdf } from '@/lib/pdfErrors';
 import { Logo } from '@/components/art/Logo';
 import { UploadDoodle } from '@/components/art/Illustrations';
 import { CategoryIcon } from '@/components/art/CategoryIcon';
@@ -28,12 +29,15 @@ export default function Home() {
   const router = useRouter();
 
   const handleFile = useCallback(async (file: File) => {
-    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-      setError(`"${file.name}" isn't a PDF. Please choose a .pdf file.`);
-      return;
-    }
     if (file.size === 0) {
       setError(`"${file.name}" is empty.`);
+      return;
+    }
+    // Decide by content, not by name: a renamed PNG is still not a PDF, and a
+    // real PDF without the .pdf extension still opens.
+    const head = new Uint8Array(await file.slice(0, 1029).arrayBuffer());
+    if (!looksLikePdf(head)) {
+      setError(`"${file.name}" isn't a PDF. Please choose a PDF file.`);
       return;
     }
 

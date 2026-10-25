@@ -50,6 +50,7 @@ import { useTextStyleActions, type TextStyleUI } from './hooks/useTextStyleActio
 import { useIsMobile } from './hooks/useIsMobile';
 import { Lotus } from '@/components/art/Doodles';
 import { LostPageIllustration } from '@/components/art/Illustrations';
+import { friendlyPdfError } from '@/lib/pdfErrors';
 
 export interface SearchMatch {
   id: string;
@@ -940,8 +941,10 @@ export default function EditorPage() {
     }
 
     async function init() {
+      let openedBytes: Uint8Array | undefined;
       try {
         const stored = await loadPdfFromStorage();
+        if (stored) openedBytes = new Uint8Array(stored.bytes);
         if (!stored) { router.push('/'); return; }
         if (cancelled) return;
 
@@ -1021,7 +1024,7 @@ export default function EditorPage() {
       } catch (e) {
         if (cancelled) return;
         console.error('[Editor] Init failed:', e);
-        setError(`Failed to parse PDF: ${e instanceof Error ? e.message : String(e)}`);
+        setError(friendlyPdfError(e, openedBytes));
         setIsLoading(false);
       }
     }
