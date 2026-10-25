@@ -165,6 +165,7 @@ export async function renderPageToCanvas(
   // Register embedded fonts in the browser
   if (typeof window !== 'undefined') {
     await registerEmbeddedFonts(fonts);
+    await prepareType3Images(fonts, objects);
   }
 
   const flowDraw = buildFlowDrawIndex(documentFlow.lines, fonts);
@@ -263,6 +264,7 @@ export async function renderPageToCanvas(
           const annotFonts = loadPageFonts(mockPage.resources, objects);
           if (typeof window !== 'undefined') {
             await registerEmbeddedFonts(annotFonts);
+            await prepareType3Images(annotFonts, objects);
           }
           
           ctx.save();
@@ -457,6 +459,7 @@ async function renderSoftMaskGroup(
   const formFonts = loadPageFonts(formResources, objects);
   if (typeof window !== 'undefined') {
     await registerEmbeddedFonts(formFonts);
+    await prepareType3Images(formFonts, objects);
   }
 
   rgbCtx.beginPath();
@@ -828,7 +831,7 @@ function drawTextRunAtPositions(
   });
 }
 
-import { drawType3Glyph, type3CharName } from './type3';
+import { drawType3Glyph, prepareType3Images, type3CharName } from './type3';
 
 function drawTextRun(
   ctx: CanvasRenderingContext2D,
@@ -1563,6 +1566,7 @@ async function drawFormXObject(
 
   const formInterpreted = interpretPage(formStream.getBytes(), formPageMock, objects);
   const formFonts = loadPageFonts(formResources, objects);
+  if (typeof window !== 'undefined') await prepareType3Images(formFonts, objects);
 
   const renderPaths = options.renderPaths ?? true;
   const renderText = options.renderText ?? true;

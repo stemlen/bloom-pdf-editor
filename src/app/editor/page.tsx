@@ -1916,6 +1916,12 @@ export default function EditorPage() {
           },
         );
 
+        // The document's fonts can't carry colour emoji, and the fallback
+        // font has none either, so say so instead of dropping them silently.
+        const originalText = initialRunTextRef.current || targetLine.text;
+        if (engine.hasEmoji(commitText) && engine.countEmoji(commitText) > engine.countEmoji(originalText)) {
+          setError('Emoji can\'t be embedded in this PDF\'s fonts, so they won\'t appear in the downloaded file.');
+        }
         if (editResult.needsFontAugmentation) {
           try {
             const missing = String.fromCharCode(

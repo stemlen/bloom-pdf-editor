@@ -85,6 +85,9 @@ export {
   isLegacyIndicFont,
   convertKrutiDevToUnicode,
   INDIC_FONT_FALLBACKS,
+  EMOJI_FONT_FALLBACKS,
+  hasEmoji,
+  countEmoji,
 } from './fonts/indic-normalizer';
 
 // ── Renderer ──
