@@ -130,3 +130,37 @@ describe('reconstructLines table cells', () => {
     expect(lines[1].x).toBe(350);
   });
 });
+
+describe('invoice-style table with right-aligned numbers', () => {
+  // Item (left-aligned) | Qty | Unit price | Total (all right-aligned)
+  const rows: Array<[string, string, string, string]> = [
+    ['Item', 'Qty', 'Unit price', 'Total'],
+    ['Product 1', '1', '$12.00', '$12.00'],
+    ['Product 2', '2', '$4.25', '$8.50'],
+    ['Product 3', '3', '$9.50', '$27.50'],
+  ];
+  const fs = 10;
+  const w = (t: string) => t.length * fs * 0.5;
+  const rightAt = (t: string, right: number) => right - w(t);
+
+  function buildRuns(): TextRun[] {
+    const runs: TextRun[] = [];
+    rows.forEach(([a, b, c, d], r) => {
+      const y = 700 - r * 18;
+      runs.push(run(a, 'F1', fs, 72, y));
+      runs.push(run(b, 'F1', fs, rightAt(b, 260), y));
+      runs.push(run(c, 'F1', fs, rightAt(c, 360), y));
+      runs.push(run(d, 'F1', fs, rightAt(d, 460), y));
+    });
+    return runs;
+  }
+
+  it('detects four columns', () => {
+    resetLineIdCounter();
+    const lines = reconstructLines(buildRuns());
+    const tables = detectTablesOnPage(lines, []);
+    expect(tables.length).toBe(1);
+    expect(tables[0].rows).toBe(4);
+    expect(tables[0].cols).toBe(4);
+  });
+});

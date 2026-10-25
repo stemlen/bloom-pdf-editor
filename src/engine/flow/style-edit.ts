@@ -1432,9 +1432,24 @@ export function duplicateLineBelow(
     if (seenRanges.has(key)) continue;
     seenRanges.add(key);
 
-    const slice = instructions.slice(range.bt, range.et + 1).map(cloneInstruction);
-    shiftInstructionsY(slice, dy);
-    clones.push(...slice);
+    // The copy is appended at the end of the stream, so it must carry the
+    // state the original relied on: the CTM from enclosing cm operators, and
+    // the font and fill colour, which may have been set outside this BT.
+    const ctm = ctmAt(instructions, range.bt);
+    const scaleY = Math.abs(ctm[3]) > 1e-6 ? ctm[3] : 1;
+    const body = instructions.slice(range.bt + 1, range.et).map(cloneInstruction);
+    shiftInstructionsY(body, dy / scaleY);
+    const color = run.fillColor ?? [0, 0, 0];
+    clones.push(
+      op('q'),
+      op('cm', ctm.map(n => new PDFNumber(n))),
+      op('rg', [new PDFNumber(color[0]), new PDFNumber(color[1]), new PDFNumber(color[2])]),
+      op('BT'),
+      op('Tf', [new PDFName(run.fontName.replace(/^\//, '')), new PDFNumber(run.fontSize || visualFontSize(run))]),
+      ...body,
+      op('ET'),
+      op('Q'),
+    );
   }
 
   if (clones.length === 0) {
@@ -1462,43 +1477,51 @@ export function duplicateLineBelow(
   return compileInstructions(instructions);
 }
 
-/** Duplicate every line in a table row one row-height below (Add Row). */
+/**
+ * Add Row: move the rows below down by one row pitch, then copy the row into
+ * the gap. `rowPitch` is the distance between row baselines when known.
+ */
 export function duplicateTableRowBelow(
   contentBytes: Uint8Array,
   rowLines: TextLine[],
+  linesBelow: TextLine[] = [],
+  rowPitch?: number,
 ): Uint8Array {
   if (rowLines.length === 0) return contentBytes;
   const heights = rowLines.map(l =>
     Math.max(l.fontSize, l.runs[0] ? visualFontSize(l.runs[0]) : l.fontSize) * 1.35,
   );
-  const dy = -Math.max(...heights, 14);
-  let bytes = contentBytes;
+  const dy = -(rowPitch && rowPitch > 0 ? rowPitch : Math.max(...heights, 14));
+  let bytes = shiftLinesY(contentBytes, linesBelow, dy);
   for (const line of rowLines) {
     bytes = duplicateLineBelow(bytes, line, dy);
   }
   return bytes;
 }
 
+/** Text placed in each cell of a column added with Add Column Right. */
+export const NEW_COLUMN_PLACEHOLDER = 'New';
+
 /**
- * Add a blank column to the right of a table by inserting empty (or " ") text
- * at each row, aligned after the rightmost cell.
+ * Add a column to the right of a table: one placeholder cell per row, all
+ * left-aligned on the same x after the widest row, on each row's baseline.
  */
 export function insertTableColumnRight(
   contentBytes: Uint8Array,
   rowLines: TextLine[][],
 ): Uint8Array {
-  let bytes = contentBytes;
-  for (const row of rowLines) {
-    if (row.length === 0) continue;
+  const rows = rowLines.filter(r => r.length > 0);
+  if (rows.length === 0) return contentBytes;
+  const tableRight = Math.max(...rows.flat().map(l => l.rightEdge));
+  const instructions = parseContentStream(contentBytes);
+  for (const row of rows) {
     const rightmost = [...row].sort((a, b) => b.rightEdge - a.rightEdge)[0];
     const run = rightmost.runs[0];
     if (!run) continue;
     const fs = visualFontSize(run);
-    const gap = Math.max(fs * 2.5, 20);
-    const x = rightmost.rightEdge + gap;
-    const y = run.y;
+    const x = tableRight + Math.max(fs * 1.5, 12);
+    const y = rightmost.baseline;
     const color = run.fillColor ?? [0, 0, 0];
-    const instructions = parseContentStream(bytes);
     instructions.push(
       op('q'),
       op('BT'),
@@ -1508,13 +1531,72 @@ export function insertTableColumnRight(
         new PDFNumber(1), new PDFNumber(0), new PDFNumber(0), new PDFNumber(1),
         new PDFNumber(x), new PDFNumber(y),
       ]),
-      op('Tj', [new PDFString(' ')]),
+      // A visible, editable placeholder: a blank cell gave no feedback at all.
+      op('Tj', [new PDFString(NEW_COLUMN_PLACEHOLDER)]),
       op('ET'),
       op('Q'),
     );
-    bytes = compileInstructions(instructions);
   }
-  return bytes;
+  return compileInstructions(instructions);
+}
+
+/** Move the text objects of the given lines vertically by dy (user space). */
+function shiftLinesY(contentBytes: Uint8Array, lines: TextLine[], dy: number): Uint8Array {
+  if (lines.length === 0 || dy === 0) return contentBytes;
+  const instructions = parseContentStream(contentBytes);
+  const done = new Set<number>();
+  for (const line of lines) {
+    for (const run of line.runs) {
+      const indices = run.sourceInstructionIndices ?? [];
+      if (indices.length === 0) continue;
+      const range = findBtEtRange(instructions, Math.min(...indices));
+      if (!range || done.has(range.bt)) continue;
+      done.add(range.bt);
+      const ctm = ctmAt(instructions, range.bt);
+      const scaleY = Math.abs(ctm[3]) > 1e-6 ? ctm[3] : 1;
+      // Only the first positioning operator is absolute for the object;
+      // later Td/T* are relative and move with it.
+      for (let i = range.bt + 1; i < range.et; i++) {
+        const inst = instructions[i];
+        if (inst.operator === 'Tm' && inst.operands.length >= 6) {
+          const f = inst.operands[5];
+          if (f instanceof PDFNumber) inst.operands[5] = new PDFNumber(f.value + dy / scaleY);
+          break;
+        }
+        if ((inst.operator === 'Td' || inst.operator === 'TD') && inst.operands.length >= 2) {
+          const y = inst.operands[1];
+          if (y instanceof PDFNumber) inst.operands[1] = new PDFNumber(y.value + dy / scaleY);
+          break;
+        }
+      }
+    }
+  }
+  return compileInstructions(instructions);
+}
+
+type Matrix6 = [number, number, number, number, number, number];
+
+/** Current transformation matrix in effect just before instruction `index`. */
+function ctmAt(instructions: CSInstruction[], index: number): Matrix6 {
+  const num = (o: unknown) => (o instanceof PDFNumber ? o.value : 0);
+  let ctm: Matrix6 = [1, 0, 0, 1, 0, 0];
+  const stack: Matrix6[] = [];
+  for (let i = 0; i < index && i < instructions.length; i++) {
+    const inst = instructions[i];
+    if (inst.operator === 'q') stack.push(ctm);
+    else if (inst.operator === 'Q') ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
+    else if (inst.operator === 'cm' && inst.operands.length >= 6) {
+      const [a, b, c, d, e, f] = inst.operands.map(num);
+      const [A, B, C, D, E, F] = ctm;
+      // m × ctm (PDF row-vector convention)
+      ctm = [
+        a * A + b * C, a * B + b * D,
+        c * A + d * C, c * B + d * D,
+        e * A + f * C + E, e * B + f * D + F,
+      ];
+    }
+  }
+  return ctm;
 }
 
 function cloneInstruction(inst: CSInstruction): CSInstruction {

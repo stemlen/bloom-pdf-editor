@@ -2461,11 +2461,17 @@ export default function EditorPage() {
     }
   }, [doc, currentPage, formFields, pushEditorHistory]);
 
-  const handleDuplicateLineBelow = useCallback(async () => {
-    const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
-    if (!doc || !engineRef.current || !line) return;
+  /**
+   * Set when Shift+Enter is pressed mid-edit: the edit is committed first, and
+   * the duplicate is made from the re-extracted line once the page re-renders.
+   * The anchor's instruction indices point at the pre-edit content, so
+   * duplicating it directly copied the original text over the edited line.
+   */
+  const pendingDuplicateRef = useRef<{ baseline: number; x: number } | null>(null);
+
+  const duplicateLine = useCallback(async (line: TextLine) => {
+    if (!doc || !engineRef.current) return;
     try {
-      if (editingLine) await handleEditSubmit(false);
       setIsSaving(true);
       const engine = engineRef.current;
       const page = doc.pages[currentPage];
@@ -2481,7 +2487,29 @@ export default function EditorPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, selectedLine, editingLine, handleEditSubmit, pushEditorHistory]);
+  }, [doc, currentPage, pushEditorHistory]);
+
+  const handleDuplicateLineBelow = useCallback(async () => {
+    const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
+    if (!doc || !engineRef.current || !line) return;
+    if (editingLine) {
+      pendingDuplicateRef.current = { baseline: line.baseline, x: line.x };
+      await handleEditSubmit(false);
+      return;
+    }
+    await duplicateLine(line);
+  }, [doc, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
+
+  // Finish a Shift+Enter duplicate once the committed edit has re-rendered.
+  useEffect(() => {
+    const pending = pendingDuplicateRef.current;
+    if (!pending || !renderResult || editingLine) return;
+    pendingDuplicateRef.current = null;
+    const fresh = renderResult.textLines.find(l =>
+      Math.abs(l.baseline - pending.baseline) < 2 && Math.abs(l.x - pending.x) < 4,
+    );
+    if (fresh) void duplicateLine(fresh);
+  }, [renderResult, editingLine, duplicateLine]);
 
   // Resolve table cell for the current selection (for sidebar actions)
   const selectedTableCell = (() => {
@@ -2509,7 +2537,14 @@ export default function EditorPage() {
       const rowLines = engineRef.current.getTableRowLines(table, cell.row);
       const page = doc.pages[currentPage];
       const bytes = engineRef.current.getPageContentBytes(page, doc.objects);
-      const next = engineRef.current.duplicateTableRowBelow(bytes, rowLines);
+      // Everything below the row moves down, like inserting a row in a word
+      // processor, so the new row doesn't overlap the next one.
+      const rowBaseline = Math.min(...rowLines.map(l => l.baseline));
+      const linesBelow = (renderResult?.textLines ?? []).filter(l => l.baseline < rowBaseline - 1);
+      const pitch = table.rowBaselines.length > 1
+        ? Math.abs(table.rowBaselines[0] - table.rowBaselines[table.rowBaselines.length - 1]) / (table.rowBaselines.length - 1)
+        : undefined;
+      const next = engineRef.current.duplicateTableRowBelow(bytes, rowLines, linesBelow, pitch);
       await engineRef.current.updatePageContent(page.contentRefs, next, doc.objects);
       pushEditorHistory('table-add-row');
       setIsDirty(true);
@@ -2520,7 +2555,7 @@ export default function EditorPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, selectedTableCell, editingLine, handleEditSubmit, pushEditorHistory]);
+  }, [doc, currentPage, selectedTableCell, editingLine, handleEditSubmit, pushEditorHistory, renderResult]);
 
   const handleAddTableColumn = useCallback(async () => {
     if (!doc || !engineRef.current || !selectedTableCell) return;
