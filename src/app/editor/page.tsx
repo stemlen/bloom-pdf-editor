@@ -622,6 +622,16 @@ export default function EditorPage() {
     syncTxState();
   }, [doc, currentPage, syncTxState]);
 
+  /**
+   * History entries are per-page snapshots. Before changing a page other than
+   * the one the latest entry describes, record that page's current state so
+   * Undo can return to it.
+   */
+  const ensureHistoryBaseline = useCallback((pageIndex: number) => {
+    if (historyRef.current.peek()?.pageIndex === pageIndex) return;
+    pushEditorHistory('baseline', undefined, pageIndex);
+  }, [pushEditorHistory]);
+
   const pushSignatureSnapshot = useCallback((next: VisualSignature[], label: string) => {
     setSignatures(next);
     signaturesRef.current = next;
@@ -2387,7 +2397,9 @@ export default function EditorPage() {
         .filter((m) => m.pageIndex === currentMatch.pageIndex).length;
       const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive, occurrence);
       if (result.newContentBytes && result.newContentBytes !== bytes) {
+        ensureHistoryBaseline(currentMatch.pageIndex);
         await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
+        pushEditorHistory('replace', undefined, currentMatch.pageIndex);
         setIsDirty(true);
         setRenderKey(k => k + 1);
       }
@@ -2396,7 +2408,7 @@ export default function EditorPage() {
     } finally {
       setSearchBusy(false);
     }
-  }, [doc, searchResults, activeMatchIndex, findText, replaceText, caseSensitive]);
+  }, [doc, searchResults, activeMatchIndex, findText, replaceText, caseSensitive, ensureHistoryBaseline, pushEditorHistory]);
 
   const handleReplaceAll = useCallback(async () => {
     if (!doc || !engineRef.current || !findText.trim()) return;
@@ -2409,7 +2421,9 @@ export default function EditorPage() {
         const bytes = engine.getPageContentBytes(page, doc.objects);
         const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive);
         if (result.newContentBytes) {
+          ensureHistoryBaseline(p);
           await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
+          pushEditorHistory('replace-all', undefined, p);
           replacedCount++;
         }
       }
@@ -2422,7 +2436,7 @@ export default function EditorPage() {
     } finally {
       setSearchBusy(false);
     }
-  }, [doc, findText, replaceText, caseSensitive]);
+  }, [doc, findText, replaceText, caseSensitive, ensureHistoryBaseline, pushEditorHistory]);
 
   const handleRecognizeText = useCallback(async () => {
     if (!doc || !engineRef.current || !pdfCanvasRef.current) return;
