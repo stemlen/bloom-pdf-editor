@@ -532,7 +532,11 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 }`}
               >
                 <Link2 size={14} />
-                {linksHighlighted ? 'Links highlighted' : 'Scan for links'}
+                {!linksHighlighted
+                  ? 'Scan for Links'
+                  : pageLinkCount === 0
+                    ? 'No Links on This Page'
+                    : `${pageLinkCount} ${pageLinkCount === 1 ? 'Link' : 'Links'} Highlighted`}
               </button>
             )}
 
@@ -576,13 +580,13 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                     className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-primary/15 text-primary border border-primary/30 hover:bg-bloom-600/25 text-xs font-semibold transition-colors"
                   >
                     <Link2 size={14} />
-                    Add link to selection
+                    Add Link to Selection
                   </button>
                 )}
                 <p className="text-[10px] text-app-faint leading-relaxed">
                   {linksHighlighted
                     ? 'Hover a highlighted link on the page to edit or open it.'
-                    : 'Click Scan for links to highlight them on the PDF. Select text to add a new one.'}
+                    : 'Click Scan for Links to highlight them on the PDF. Select text to add a new one.'}
                 </p>
               </>
             )}

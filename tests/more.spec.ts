@@ -129,14 +129,14 @@ test.describe("links", () => {
     const at = await pdfPoint(page, 120, 670);
     await page.mouse.click(at.x, at.y);
     await page.keyboard.press("ControlOrMeta+a");
-    await page.getByRole("button", { name: "Add link to selection" }).click();
+    await page.getByRole("button", { name: "Add Link to Selection" }).click();
     await page.getByPlaceholder("https://example.com").fill("https://bloompdf.app/one");
     await page.getByRole("button", { name: "Save" }).click();
     // Finish editing the line (link hovering is paused while a line is open).
     const blank = await pdfPoint(page, 500, 120);
     await page.mouse.click(blank.x, blank.y);
     await expect(page.getByLabel("Edit line")).toHaveCount(0);
-    await page.getByRole("button", { name: /Scan for links|Links highlighted/ }).click();
+    await page.getByRole("button", { name: /Scan for Links|Links? Highlighted|No Links on This Page/ }).click();
 
     const popover = page.locator("[data-link-popover]");
     // The popover opens after hovering a link for a moment.

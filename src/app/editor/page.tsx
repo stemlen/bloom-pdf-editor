@@ -294,6 +294,8 @@ function cssFontFamilyFromUI(name: string): string {
 // ─── Component ──────────────────────────────────────────────────────────────
 
 
+const LINK_NEEDS_SELECTION = 'Select the text you want to link first, then choose Add Link to Selection.';
+
 /** Style a new text box starts with. */
 const DEFAULT_TEXT_STYLE = { fontFamily: 'Helvetica', fontSize: 12, color: '#000000' } as const;
 
@@ -1523,10 +1525,10 @@ export default function EditorPage() {
         const bw = Math.abs(bottomRight.cssX - topLeft.cssX);
         const bh = Math.abs(bottomRight.cssY - topLeft.cssY);
         const active = selectedLink?.ref.toKey() === link.ref.toKey();
-        ctx.strokeStyle = active ? '#52525b' : 'rgba(37, 99, 235, 0.85)';
-        ctx.lineWidth = active ? 2 : 1;
+        ctx.strokeStyle = active ? '#52525b' : 'rgba(37, 99, 235, 0.9)';
+        ctx.lineWidth = active ? 2 : 1.5;
         ctx.setLineDash(active ? [] : [4, 3]);
-        ctx.fillStyle = active ? 'rgba(63, 63, 70, 0.28)' : 'rgba(37, 99, 235, 0.06)';
+        ctx.fillStyle = active ? 'rgba(63, 63, 70, 0.28)' : 'rgba(37, 99, 235, 0.16)';
         // Rounded highlight for the active/hovered link
         const r = Math.min(6, bw / 2, bh / 2);
         ctx.beginPath();
@@ -5719,7 +5721,7 @@ export default function EditorPage() {
             // Create from current text selection / line
             const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
             if (!line) {
-              window.alert('Select or click a text line first, then add a link.');
+              window.alert(LINK_NEEDS_SELECTION);
               return;
             }
             const sel = editSelRef.current;
@@ -5744,7 +5746,7 @@ export default function EditorPage() {
                 setIsDirty(true);
                 setRenderKey(k => k + 1);
               } else {
-                window.alert('Select some text first, then add a link.');
+                window.alert(LINK_NEEDS_SELECTION);
               }
             } catch (err) {
               console.warn('[Editor] Add link failed:', err);
@@ -5756,8 +5758,11 @@ export default function EditorPage() {
           }}
           onAddLink={() => {
             const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
-            if (!line) {
-              window.alert('Select or click a text line first, then add a link.');
+            // Validate before asking for a URL: while editing, a collapsed caret
+            // has nothing to link.
+            const sel = editSelRef.current;
+            if (!line || (editingLine && sel.end <= sel.start)) {
+              window.alert(LINK_NEEDS_SELECTION);
               return;
             }
             closeLinkPopover();
