@@ -676,9 +676,16 @@ export default function EditorPage() {
   const queueOrApplyStyle = useCallback((patch: Partial<TextStyleUI>) => {
     if (!selectedLine) return;
     if (editingLineRef.current) {
-      const sel = editSelRef.current;
+      let sel = editSelRef.current;
       const line = editAnchorLineRef.current ?? selectedLine;
-      // Collapsed caret → typing style only (Word-like). Do NOT restyle existing text.
+      // Alignment is a property of the whole line. Other styles also apply to
+      // the whole line while nothing is selected and nothing has been typed
+      // yet (the user clicked a line and pressed Bold); once they type, a
+      // collapsed caret sets the typing style instead, like a word processor.
+      const untouched = editTextRef.current === (initialRunTextRef.current || line.text);
+      if (sel.end <= sel.start && (patch.align != null || untouched)) {
+        sel = { start: 0, end: line.text.length };
+      }
       if (sel.end <= sel.start) {
         typingStyleRef.current = {
           ...typingStyleRef.current,
