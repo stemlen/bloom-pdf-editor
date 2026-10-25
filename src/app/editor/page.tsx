@@ -41,6 +41,7 @@ import { SignatureOverlay } from './components/signatures/SignatureOverlay';
 import { SignatureCreateDialog, type SignatureCreateResult } from './components/signatures/SignatureCreateDialog';
 import { CertificateImportDialog } from './components/signatures/CertificateImportDialog';
 import { WatermarkPreview } from './components/WatermarkPreview';
+import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
 import { FindReplacePanel } from './components/FindReplacePanel';
 import { StatusBar } from './components/StatusBar';
@@ -4965,6 +4966,14 @@ export default function EditorPage() {
   }, [doc, currentPage, fileName, saveMode, isDirty, setIsDirty, createExportDocWithOverlays]);
 
   // ── Compressed Download ──
+  const [signedCompressOpen, setSignedCompressOpen] = useState(false);
+  const signedCompressResolveRef = useRef<((choice: SignedCompressChoice) => void) | null>(null);
+  const chooseSignedCompress = useCallback((choice: SignedCompressChoice) => {
+    setSignedCompressOpen(false);
+    signedCompressResolveRef.current?.(choice);
+    signedCompressResolveRef.current = null;
+  }, []);
+
   const handleCompressedDownload = useCallback(async (opts: {
     quality: number;
     dpi: number;
@@ -4972,11 +4981,12 @@ export default function EditorPage() {
   }) => {
     if (!doc || !engineRef.current) return;
     if (hasDigitalSignature(doc.rawBytes)) {
-      const compressAnyway = window.confirm(
-        'This PDF is digitally signed. Compressing rewrites the file, which removes the signature.\n\n' +
-          'Choose OK to compress anyway, or Cancel to download the signed PDF without compression.',
-      );
-      if (!compressAnyway) {
+      const choice = await new Promise<SignedCompressChoice>((resolve) => {
+        signedCompressResolveRef.current = resolve;
+        setSignedCompressOpen(true);
+      });
+      if (choice === 'cancel') return;
+      if (choice === 'signed') {
         await handleDownload();
         return;
       }
@@ -6994,6 +7004,7 @@ export default function EditorPage() {
       />
 
       {/* ── Export Panel ── */}
+      <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} />
       <ExportPanel
         isOpen={showExportPanel}
         onClose={() => setShowExportPanel(false)}
