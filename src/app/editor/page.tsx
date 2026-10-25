@@ -605,6 +605,7 @@ export default function EditorPage() {
       signatures?: VisualSignature[];
     },
     pageIndexOverride?: number,
+    batchId?: string,
   ) => {
     if (!doc || !engineRef.current) return;
     const pageIndex = pageIndexOverride ?? currentPage;
@@ -623,6 +624,7 @@ export default function EditorPage() {
       },
       label,
     );
+    if (batchId) entry.batchId = batchId;
     historyRef.current.push(entry);
     syncTxState();
   }, [doc, currentPage, syncTxState]);
@@ -2036,10 +2038,10 @@ export default function EditorPage() {
   // ── Undo ──
   const handleUndo = useCallback(async () => {
     if (!doc || !engineRef.current) return;
-    const entry = historyRef.current.undo();
-    if (!entry) return;
+    const entries = historyRef.current.undoStep();
+    if (!entries) return;
     try {
-      await applyHistoryEntry(entry);
+      for (const entry of entries) await applyHistoryEntry(entry);
     } catch (e) {
       console.error('[Editor] Undo failed:', e);
     }
@@ -2047,10 +2049,10 @@ export default function EditorPage() {
 
   const handleRedo = useCallback(async () => {
     if (!doc || !engineRef.current) return;
-    const entry = historyRef.current.redo();
-    if (!entry) return;
+    const entries = historyRef.current.redoStep();
+    if (!entries) return;
     try {
-      await applyHistoryEntry(entry);
+      for (const entry of entries) await applyHistoryEntry(entry);
     } catch (e) {
       console.error('[Editor] Redo failed:', e);
     }
@@ -2440,18 +2442,26 @@ export default function EditorPage() {
     setSearchBusy(true);
     try {
       const engine = engineRef.current;
-      let replacedCount = 0;
+      // Work out every page's replacement first, then record the batch so a
+      // single Undo reverts all pages at once (BE-203).
+      const changes: { pageIndex: number; bytes: Uint8Array }[] = [];
       for (let p = 0; p < doc.pages.length; p++) {
         const page = doc.pages[p];
         const bytes = engine.getPageContentBytes(page, doc.objects);
         const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive);
-        if (result.newContentBytes) {
-          ensureHistoryBaseline(p);
-          await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
-          pushEditorHistory('replace-all', undefined, p);
-          replacedCount++;
+        if (result.newContentBytes && result.newContentBytes !== bytes) {
+          changes.push({ pageIndex: p, bytes: result.newContentBytes });
         }
       }
+      for (const { pageIndex } of changes) {
+        if (!historyRef.current.hasPage(pageIndex)) pushEditorHistory('baseline', undefined, pageIndex);
+      }
+      const batchId = `replace-all-${Date.now()}`;
+      for (const { pageIndex, bytes } of changes) {
+        await engine.updatePageContent(doc.pages[pageIndex].contentRefs, bytes, doc.objects);
+        pushEditorHistory('replace-all', undefined, pageIndex, batchId);
+      }
+      const replacedCount = changes.length;
       if (replacedCount > 0) {
         setIsDirty(true);
         setRenderKey(k => k + 1);
@@ -2461,7 +2471,7 @@ export default function EditorPage() {
     } finally {
       setSearchBusy(false);
     }
-  }, [doc, findText, replaceText, caseSensitive, ensureHistoryBaseline, pushEditorHistory]);
+  }, [doc, findText, replaceText, caseSensitive, pushEditorHistory]);
 
   const handleRecognizeText = useCallback(async () => {
     if (!doc || !engineRef.current || !pdfCanvasRef.current) return;

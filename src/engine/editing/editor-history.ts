@@ -41,6 +41,11 @@ export interface EditorHistoryEntry {
   contentBytes: Uint8Array;
   annotSnapshot: PageAnnotSnapshot;
   overlays: OverlaySnapshot;
+  /**
+   * Entries that share a batch id form one user action spanning several
+   * pages (e.g. Replace All); Undo and Redo treat them as a single step.
+   */
+  batchId?: string;
 }
 
 /** Deep-clone a PDF object graph (dicts/arrays/streams). Refs are copied by value. */
@@ -257,6 +262,60 @@ export class EditorHistory {
     if (!next) return null;
     this.undoStack.push(next);
     return next;
+  }
+
+  /**
+   * Batch-aware undo. Pops the latest step (every entry of its batch, if it
+   * has one) and returns the snapshots to apply: for each page the step
+   * touched, the most recent remaining entry for that page.
+   */
+  undoStep(): EditorHistoryEntry[] | null {
+    if (this.undoStack.length < 2) return null;
+    const top = this.undoStack[this.undoStack.length - 1];
+    const popped: EditorHistoryEntry[] = [];
+    while (this.undoStack.length > 1) {
+      const entry = this.undoStack[this.undoStack.length - 1];
+      if (popped.length > 0 && (!top.batchId || entry.batchId !== top.batchId)) break;
+      popped.push(this.undoStack.pop()!);
+    }
+    // Redo replays in push order, so keep the batch's first entry on top.
+    for (const entry of popped) this.redoStack.push(entry);
+
+    const pages = [...new Set(popped.map((e) => e.pageIndex))];
+    const restore: EditorHistoryEntry[] = [];
+    for (const pageIndex of pages) {
+      for (let i = this.undoStack.length - 1; i >= 0; i--) {
+        if (this.undoStack[i].pageIndex === pageIndex) {
+          restore.push(this.undoStack[i]);
+          break;
+        }
+      }
+    }
+    // Apply the remaining top entry last so its page becomes the current one.
+    const newTop = this.undoStack[this.undoStack.length - 1];
+    if (!restore.includes(newTop)) restore.push(newTop);
+    else restore.push(...restore.splice(restore.indexOf(newTop), 1));
+    return restore;
+  }
+
+  /** Batch-aware redo: re-applies every entry of the next step, in order. */
+  redoStep(): EditorHistoryEntry[] | null {
+    const first = this.redoStack.pop();
+    if (!first) return null;
+    const applied = [first];
+    this.undoStack.push(first);
+    while (first.batchId && this.redoStack.length > 0
+      && this.redoStack[this.redoStack.length - 1].batchId === first.batchId) {
+      const next = this.redoStack.pop()!;
+      this.undoStack.push(next);
+      applied.push(next);
+    }
+    return applied;
+  }
+
+  /** True if any undo entry describes the given page. */
+  hasPage(pageIndex: number): boolean {
+    return this.undoStack.some((e) => e.pageIndex === pageIndex);
   }
 
   peek(): EditorHistoryEntry | null {
