@@ -1,7 +1,7 @@
 'use client';
 
 import { joinParts } from '@/lib/format';
-import { useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   loadPdfFromStorage,
@@ -6467,9 +6467,18 @@ export default function EditorPage() {
               const isActive = activeFloatingImageId === fi.id;
               const rot = fi.rotation || 0;
 
+              // Upright panel beside the image's rotated bounding box.
+              const frameW = fi.pdfWidth * scale + 8;
+              const frameH = fi.pdfHeight * scale + 8;
+              const rad = (rot * Math.PI) / 180;
+              const halfW = (frameW * Math.abs(Math.cos(rad)) + frameH * Math.abs(Math.sin(rad))) / 2;
+              const halfH = (frameW * Math.abs(Math.sin(rad)) + frameH * Math.abs(Math.cos(rad))) / 2;
+              const panelLeft = cssX + frameW / 2 + halfW + 10;
+              const panelTop = cssY + frameH / 2 - halfH;
+
               return (
+                <Fragment key={fi.id}>
                 <div
-                  key={fi.id}
                   className={`floating-image-container absolute z-20 cursor-move border-2 ${isActive ? 'border-primary border-dashed' : 'border-transparent hover:border-border-strong hover:border-dashed'} p-1 -m-1`}
                   style={{
                     left: cssX,
@@ -6569,7 +6578,7 @@ export default function EditorPage() {
                         <Copy size={12} />
                       </button>
                       <button
-                        className="absolute -bottom-3 -right-3 bg-primary text-white rounded-full p-1 shadow hover:bg-bloom-600 transition-colors z-30"
+                        className="absolute -bottom-3 -left-3 bg-primary text-white rounded-full p-1 shadow hover:bg-bloom-600 transition-colors z-30"
                         title="Replace Image"
                         onClick={(e) => {
                           e.stopPropagation();
@@ -6580,71 +6589,14 @@ export default function EditorPage() {
                         <Image size={12} />
                       </button>
 
-                      {/* Dimensions panel in cm + Rotation */}
-                      <div
-                        className="absolute top-0 -right-[118px] bg-popover text-foreground rounded-lg p-2 shadow-xl border border-border text-xs flex flex-col gap-2 z-30 w-28"
-                        onClick={e => e.stopPropagation()}
-                        onPointerDown={e => e.stopPropagation()}
-                      >
-                        <div className="text-[9px] text-muted-foreground font-bold uppercase tracking-wider mb-0.5">Transform</div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-muted-foreground w-3 text-center">W</span>
-                          <input
-                            type="number"
-                            value={Math.round((fi.pdfWidth * 2.54 * 10) / 72) / 10}
-                            onChange={e => {
-                              const newW = (parseFloat(e.target.value) * 72) / 2.54;
-                              if (newW > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: newW } : p), 'resize-image');
-                            }}
-                            className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
-                            step="0.1"
-                          />
-                          <span className="text-muted-foreground text-[10px]">cm</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-muted-foreground w-3 text-center">H</span>
-                          <input
-                            type="number"
-                            value={Math.round((fi.pdfHeight * 2.54 * 10) / 72) / 10}
-                            onChange={e => {
-                              const newH = (parseFloat(e.target.value) * 72) / 2.54;
-                              if (newH > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfHeight: newH } : p), 'resize-image');
-                            }}
-                            className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
-                            step="0.1"
-                          />
-                          <span className="text-muted-foreground text-[10px]">cm</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-1 border-t border-border pt-1.5 mt-0.5">
-                          <span className="text-muted-foreground w-3 text-center">↻</span>
-                          <input
-                            type="number"
-                            value={Math.round(rot)}
-                            onChange={e => {
-                              const val = (parseFloat(e.target.value) || 0) % 360;
-                              updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: (val + 360) % 360 } : p), 'rotate-image');
-                            }}
-                            className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
-                          />
-                          <button
-                            type="button"
-                            title="Rotate 90° clockwise"
-                            className="p-1 hover:bg-muted rounded text-foreground/90 hover:text-primary transition-colors"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: ((p.rotation || 0) + 90) % 360 } : p), 'rotate-image');
-                            }}
-                          >
-                            <RotateCw size={11} />
-                          </button>
-                        </div>
-                      </div>
                     </>
                   )}
 
-                  {/* CSS Resize Handle (only active when hovered to avoid drag conflict) */}
+                  {/* Resize handle: shown only while the image is selected (BE-313) */}
+                  {isActive && (
                   <div
-                    className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize bg-primary/50"
+                    title="Drag to resize"
+                    className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 cursor-se-resize rounded-sm border border-white bg-primary shadow z-30"
                     onPointerDown={e => {
                       e.stopPropagation(); // prevent dragging
                       const startX = e.clientX;
@@ -6670,7 +6622,71 @@ export default function EditorPage() {
                       window.addEventListener('pointerup', handleUp);
                     }}
                   />
+                  )}
                 </div>
+                {/* Transform panel, outside the rotated frame so it stays upright (BE-309) */}
+                {isActive && (
+                  <div
+                    className="absolute bg-popover text-foreground rounded-lg p-2 shadow-xl border border-border text-xs flex flex-col gap-2 z-30 w-28"
+                    style={{ left: panelLeft, top: panelTop }}
+                    onClick={e => e.stopPropagation()}
+                    onPointerDown={e => e.stopPropagation()}
+                  >
+                    <div className="text-[9px] text-muted-foreground font-bold uppercase tracking-wider mb-0.5">Transform</div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-muted-foreground w-3 text-center">W</span>
+                      <input
+                        type="number"
+                        value={Math.round(fi.pdfWidth)}
+                        onChange={e => {
+                          const newW = parseFloat(e.target.value);
+                          if (newW > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: newW } : p), 'resize-image');
+                        }}
+                        className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
+                        step="1"
+                      />
+                      <span className="text-muted-foreground text-[10px]">pt</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-muted-foreground w-3 text-center">H</span>
+                      <input
+                        type="number"
+                        value={Math.round(fi.pdfHeight)}
+                        onChange={e => {
+                          const newH = parseFloat(e.target.value);
+                          if (newH > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfHeight: newH } : p), 'resize-image');
+                        }}
+                        className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
+                        step="1"
+                      />
+                      <span className="text-muted-foreground text-[10px]">pt</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-1 border-t border-border pt-1.5 mt-0.5">
+                      <span className="text-muted-foreground w-3 text-center">↻</span>
+                      <input
+                        type="number"
+                        value={Math.round(rot)}
+                        onChange={e => {
+                          const val = (parseFloat(e.target.value) || 0) % 360;
+                          updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: (val + 360) % 360 } : p), 'rotate-image');
+                        }}
+                        className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <button
+                        type="button"
+                        title="Rotate 90° clockwise"
+                        className="p-1 hover:bg-muted rounded text-foreground/90 hover:text-primary transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: ((p.rotation || 0) + 90) % 360 } : p), 'rotate-image');
+                        }}
+                      >
+                        <RotateCw size={11} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+                </Fragment>
               );
             })}
 
