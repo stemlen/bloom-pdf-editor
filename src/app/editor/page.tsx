@@ -5289,6 +5289,12 @@ export default function EditorPage() {
     setFloatingImages(prev => [...prev, newFloatingImage]);
     setActiveFloatingImageId(newFloatingImage.id);
     setIsDirty(true);
+    // A restored image leaves the bin, so it can't be restored twice (BE-310).
+    setRemovedImages(prev => {
+      const next = prev.filter(r => r.id !== record.id);
+      void saveRemovedImages(next);
+      return next;
+    });
   }, [doc, currentPage]);
 
   const handleInsertRemovedImage = useCallback((record: RemovedImageRecord) => {
