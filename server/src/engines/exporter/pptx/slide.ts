@@ -1,3 +1,4 @@
+import type { BoundingBox } from '../../common/geometry.js';
 import type { GraphicObject } from '../../graphics/types.js';
 import type { UnifiedDocumentModel } from '../../udm/types.js';
 import { resetShapeIds, textBoxSp, vectorSp } from './shapes.js';
@@ -19,10 +20,15 @@ export function buildSlideXml(
 ): string {
   resetShapeIds();
   const parts: string[] = [];
+  const page = udm.idm.sections.flatMap((s) => s.pages).find((p) => p.index === pageIndex);
+  const pageHeight = page?.height ?? 792;
+  // PDF boxes are bottom-up; slide offsets are top-down.
+  const toSlide = (b: BoundingBox): BoundingBox => ({ ...b, y: pageHeight - b.y - b.height });
 
   // Tables on this page
-  for (const table of udm.tables.filter((t) => t.pageIndex === pageIndex)) {
-    parts.push(tableGraphicFrame(table));
+  const tables = udm.tables.filter((t) => t.pageIndex === pageIndex);
+  for (const table of tables) {
+    parts.push(tableGraphicFrame({ ...table, bbox: toSlide(table.bbox) }));
   }
 
   // Text nodes (skip absorbed into tables)
@@ -35,15 +41,25 @@ export function buildSlideXml(
     if (n.type === 'list_item') continue;
     if (n.type === 'image') {
       const alt = 'alt' in n ? String(n.alt ?? 'Image') : 'Image';
-      parts.push(textBoxSp(`[Image: ${alt}]`, n.bbox!, { fontSizePt: 12, name: 'Image' }));
+      parts.push(textBoxSp(`[Image: ${alt}]`, toSlide(n.bbox!), { fontSizePt: 12, name: 'Image' }));
       continue;
     }
     if (!('text' in n) || !n.text?.trim()) continue;
     const bold = n.type === 'heading' || n.type === 'title' || n.type === 'subtitle';
+    const runSize = 'runs' in n && Array.isArray(n.runs) ? n.runs.find((r) => r.fontSize)?.fontSize : undefined;
     const fontSize =
-      n.type === 'title' ? 28 : n.type === 'heading' ? 20 : n.type === 'subtitle' ? 18 : 14;
+      runSize ??
+      (n.type === 'title' ? 28 : n.type === 'heading' ? 20 : n.type === 'subtitle' ? 18 : 12);
+    // Slide fonts are a little wider than the PDF's, so give each box some
+    // slack to avoid re-wrapping a single line onto the next box.
+    const box = toSlide(n.bbox!);
+    const fitted = {
+      ...box,
+      width: Math.min(box.width * 1.12 + 4, (page?.width ?? 612) - box.x),
+      height: Math.max(box.height, fontSize * 1.25),
+    };
     parts.push(
-      textBoxSp(String(n.text), n.bbox!, {
+      textBoxSp(String(n.text), fitted, {
         bold,
         fontSizePt: fontSize,
         name: n.type,
@@ -57,10 +73,12 @@ export function buildSlideXml(
       o.pageIndex === pageIndex && o.kind === 'vector',
   );
   for (const v of graphics) {
+    // Ruling lines of a table are drawn by the native table itself.
+    if (tables.some((t) => within(v.bbox, t.bbox))) continue;
     if (v.shape === 'rectangle' || v.shape === 'rounded_rectangle') {
-      parts.push(vectorSp('rectangle', v.bbox));
+      parts.push(vectorSp('rectangle', toSlide(v.bbox)));
     } else if (v.shape === 'line') {
-      parts.push(vectorSp('line', v.bbox));
+      parts.push(vectorSp('line', toSlide(v.bbox)));
     }
   }
 
@@ -131,4 +149,13 @@ export function slideSizeEmu(udm: UnifiedDocumentModel): { cx: number; cy: numbe
   const w = page?.width ?? 612;
   const h = page?.height ?? 792;
   return { cx: Math.round(w * 12700), cy: Math.round(h * 12700) };
+}
+
+function within(inner: BoundingBox, outer: BoundingBox, pad = 2): boolean {
+  return (
+    inner.x >= outer.x - pad &&
+    inner.y >= outer.y - pad &&
+    inner.x + inner.width <= outer.x + outer.width + pad &&
+    inner.y + inner.height <= outer.y + outer.height + pad
+  );
 }
