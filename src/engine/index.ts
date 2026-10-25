@@ -256,11 +256,14 @@ export {
   addAnnotationToPage,
   removeAnnotationFromPage,
   eraseAnnotationsAtPoint,
+  findMarkupAnnotationsAtPoint,
+  hitTestMarkupAnnotation,
   clearMarkupAnnotationsOnPage,
   pdfDateString,
 } from './editor/annotation-engine';
 export type {
   AnnotationBase,
+  MarkupAnnotationHit,
   HighlightAnnotation,
   FreeTextAnnotation,
   InkAnnotation,

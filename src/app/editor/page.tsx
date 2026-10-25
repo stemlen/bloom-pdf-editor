@@ -27,7 +27,7 @@ import {
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
 } from './utils';
-import { getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
+import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
 import { findMatchingFlowLine } from './flowLineMatch';
 
@@ -41,6 +41,7 @@ import { SignatureOverlay } from './components/signatures/SignatureOverlay';
 import { SignatureCreateDialog, type SignatureCreateResult } from './components/signatures/SignatureCreateDialog';
 import { CertificateImportDialog } from './components/signatures/CertificateImportDialog';
 import { WatermarkPreview } from './components/WatermarkPreview';
+import { hitTestDrawnPath, drawnPathBounds } from './drawingHitTest';
 import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
 import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
@@ -386,6 +387,12 @@ export default function EditorPage() {
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawnPaths, setDrawnPaths] = useState<DrawnPath[]>([]);
+  /** Drawing picked with the Select tool: an unsaved stroke or a saved markup annotation (BE-307). */
+  const [selectedDrawing, setSelectedDrawing] = useState<
+    | { kind: 'overlay'; id: string }
+    | { kind: 'annot'; refKey: string; rect: { x: number; y: number; width: number; height: number } }
+    | null
+  >(null);
   const [drawMode, setDrawMode] = useState<DrawMode>('freehand');
   const currentDrawPath = useRef<{ x: number; y: number }[]>([]);
   const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -662,6 +669,30 @@ export default function EditorPage() {
     pushEditorHistory(label, { floatingImages: floatingImagesRef.current });
     setIsDirty(true);
   }, [pushEditorHistory]);
+
+  const [selectedDrawingPage, setSelectedDrawingPage] = useState(currentPage);
+  if (selectedDrawingPage !== currentPage) {
+    setSelectedDrawingPage(currentPage);
+    setSelectedDrawing(null);
+  }
+
+  const handleDeleteSelectedDrawing = useCallback(() => {
+    if (!selectedDrawing || !doc || !engineRef.current) return;
+    if (selectedDrawing.kind === 'overlay') {
+      const next = drawnPathsRef.current.filter((p) => p.id !== selectedDrawing.id);
+      setDrawnPaths(next);
+      drawnPathsRef.current = next;
+      pushEditorHistory('delete-drawing', { drawnPaths: next });
+    } else {
+      const page = doc.pages[currentPage];
+      const [num, gen] = selectedDrawing.refKey.split('_').map(Number);
+      engineRef.current.removeAnnotationFromPage(page.dict, new PDFRef(num, gen), doc.objects);
+      pushEditorHistory('delete-drawing');
+      setRenderKey((k) => k + 1);
+    }
+    setSelectedDrawing(null);
+    setIsDirty(true);
+  }, [selectedDrawing, doc, currentPage, pushEditorHistory]);
 
   const pushSignatureSnapshot = useCallback((next: VisualSignature[], label: string) => {
     setSignatures(next);
@@ -1662,7 +1693,30 @@ export default function EditorPage() {
       }
       ctx.restore();
     }
-  }, [editingLine, editText, caretPos, renderResult, doc, currentPage, scale, drawnPaths, activeTool, displayItems, selectedDisplayItem, formFields, selectedFormField, editOffsetCss, editManualSize, editStyleOverrides, editSel, textFontSize, textUnderline, textColor, strokePaths, pageLinks, selectedLink, linksHighlighted, detectedTables, activeTableId]);
+
+    // ── Drawing picked with the Select tool (BE-307) ──
+    if (selectedDrawing && activeTool === 'select') {
+      let box: { x: number; y: number; width: number; height: number } | null = null;
+      if (selectedDrawing.kind === 'overlay') {
+        const path = drawnPaths.find((p) => p.id === selectedDrawing.id);
+        box = path ? drawnPathBounds(path) : null;
+      } else {
+        const r = selectedDrawing.rect;
+        const tl = pdfToCanvas(r.x, r.y + r.height, scale, renderResult.pageHeight, mediaBox.x, mediaBox.y);
+        const br = pdfToCanvas(r.x + r.width, r.y, scale, renderResult.pageHeight, mediaBox.x, mediaBox.y);
+        box = { x: tl.cssX, y: tl.cssY, width: br.cssX - tl.cssX, height: br.cssY - tl.cssY };
+      }
+      if (box) {
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 3]);
+        ctx.strokeRect(box.x - 3, box.y - 3, box.width + 6, box.height + 6);
+        ctx.restore();
+      }
+    }
+  }, [selectedDrawing, editingLine, editText, caretPos, renderResult, doc, currentPage, scale, drawnPaths, activeTool, displayItems, selectedDisplayItem, formFields, selectedFormField, editOffsetCss, editManualSize, editStyleOverrides, editSel, textFontSize, textUnderline, textColor, strokePaths, pageLinks, selectedLink, linksHighlighted, detectedTables, activeTableId]);
 
   // Re-draw overlay whenever edit state changes
   useEffect(() => { drawOverlay(); }, [drawOverlay]);
@@ -2737,6 +2791,23 @@ export default function EditorPage() {
           return;
         }
       }
+
+      // Select tool: pick a drawing (unsaved stroke first, then saved markup)
+      if (activeTool === 'select' && engineRef.current) {
+        const pathHit = hitTestDrawnPath(drawnPathsRef.current, cssX, cssY);
+        const annotHit = pathHit ? null : engineRef.current.hitTestMarkupAnnotation(page.dict, doc.objects, pdfX, pdfY, 4 / scale);
+        if (pathHit || annotHit) {
+          if (editingLine) void handleEditSubmit(false);
+          setSelectedDrawing(pathHit
+            ? { kind: 'overlay', id: pathHit.id }
+            : { kind: 'annot', refKey: annotHit!.ref.toKey(), rect: annotHit!.rect });
+          setSelectedDisplayItem(null);
+          setSelectedLine(null);
+          setActiveFloatingImageId(null);
+          return;
+        }
+      }
+      setSelectedDrawing(null);
 
       // Click a form field box → select it for editing
       if (formFields.length > 0 && engineRef.current) {
@@ -5470,6 +5541,9 @@ export default function EditorPage() {
         if (!e.metaKey && !e.ctrlKey) setActiveTool('erase');
       } else if (e.key === 's' || e.key === 'S') {
         if (!e.metaKey && !e.ctrlKey && !e.shiftKey) setActiveTool('sign');
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDrawing) {
+        e.preventDefault();
+        handleDeleteSelectedDrawing();
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedSignatureId) {
         e.preventDefault();
         handleSignatureDelete(selectedSignatureId);
@@ -5523,7 +5597,7 @@ export default function EditorPage() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [selectTool, goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures, updateFloatingImages]);
+  }, [selectTool, goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures, updateFloatingImages, selectedDrawing, handleDeleteSelectedDrawing]);
 
   // ── Global clipboard paste listener for images (Ctrl+V on Windows / Cmd+V on Mac) ──
   useEffect(() => {
