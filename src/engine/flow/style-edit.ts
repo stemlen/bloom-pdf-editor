@@ -650,6 +650,11 @@ export interface StyleApplyOptions {
    * catches true collisions.
    */
   skipTrailingFontSizeShifts?: boolean;
+  /**
+   * Column the line is aligned within. Without it, alignment falls back to
+   * symmetric page margins around the line's left edge.
+   */
+  alignBounds?: { left: number; right: number };
 }
 
 /**
@@ -711,7 +716,12 @@ export function applyStyleToSelection(
     }
   }
 
-  for (const [run, range] of byRun) {
+  // Right to left: ops inserted for one run must not shift the source
+  // indices of runs still to be patched.
+  const ordered = [...byRun].sort(
+    (a, b) => Math.min(...(b[0].sourceInstructionIndices ?? [0])) - Math.min(...(a[0].sourceInstructionIndices ?? [0])),
+  );
+  for (const [run, range] of ordered) {
     const patched = patchRunStyle(
       bytes, run, style, page, objects, range.localStart, range.localEnd,
     );
@@ -730,7 +740,11 @@ export function applyStyleToSelection(
   }
 
   if (style.align && line.runs.length > 0) {
-    bytes = applyAlignmentShift(bytes, line, style.align);
+    const bounds = options?.alignBounds ?? {
+      left: line.leftMargin,
+      right: page.mediaBox.x + page.mediaBox.width - (line.leftMargin - page.mediaBox.x),
+    };
+    bytes = applyAlignmentShift(bytes, line, style.align, bounds);
   }
 
   return {
@@ -764,8 +778,13 @@ export async function applyStyleToSelectionOnPage(
 ): Promise<StyleEditResult> {
   const page = doc.pages[pageIndex];
   const contentBytes = getPageContentBytes(page, doc.objects);
+  let opts = options;
+  if (style.align && !opts?.alignBounds) {
+    const lines = reconstructLines(interpretPage(contentBytes, page, doc.objects).textRuns);
+    opts = { ...opts, alignBounds: alignmentBoundsForLine(line, lines, page) };
+  }
   const result = applyStyleToSelection(
-    contentBytes, page, doc.objects, line, selectionStart, selectionEnd, style, options,
+    contentBytes, page, doc.objects, line, selectionStart, selectionEnd, style, opts,
   );
   await updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
   return result;
@@ -1013,7 +1032,8 @@ function patchRunStyle(
 
       // 2) Fall back to Standard14 face we can inject
       if (!fontKey) {
-        const desired = resolveStyledFontName(run.fontName, wantBold, wantItalic);
+        // run.fontName is the resource key (F1); the family comes from BaseFont.
+        const desired = resolveStyledFontName(fontDataForFlags?.baseFont || run.fontName, wantBold, wantItalic);
         fontKey = ensureStandard14Font(page, objects, desired);
       }
     }
@@ -1077,6 +1097,26 @@ function patchRunStyle(
   return { bytes: compileInstructions(instructions), addedUnderline, removedUnderline };
 }
 
+const SHOWING_OPS = new Set(['Tj', 'TJ', "'", '"']);
+
+/**
+ * True when the Tf at `tfIdx` governs only this run's text-showing ops.
+ * Text state outlives BT/ET, so a later text object that shows text before
+ * setting its own font also depends on it.
+ */
+function tfIsExclusiveToRun(
+  instructions: CSInstruction[],
+  tfIdx: number,
+  runShowing: Set<number>,
+): boolean {
+  for (let i = tfIdx + 1; i < instructions.length; i++) {
+    const op = instructions[i].operator;
+    if (op === 'Tf') return true;
+    if (SHOWING_OPS.has(op) && !runShowing.has(i)) return false;
+  }
+  return true;
+}
+
 function applyWholeRunFontPatch(
   instructions: CSInstruction[],
   run: TextRun,
@@ -1087,35 +1127,62 @@ function applyWholeRunFontPatch(
 ): void {
   const range2 = findBtEtRange(instructions, textIndex) ?? range;
 
-  for (let i = textIndex; i >= range2.bt; i--) {
+  // Governing Tf: inside this text object, else the last one before it.
+  let tfIdx = -1;
+  for (let i = textIndex; i >= 0; i--) {
     if (instructions[i].operator === 'Tf' && instructions[i].operands.length >= 2) {
-      if (style.fontSize != null) {
-        const tfSize = instructions[i].operands[1];
-        const curTf = tfSize instanceof PDFNumber ? tfSize.value : run.fontSize;
-        const visual = visualFontSize(run);
-        if (curTf > 0 && curTf <= 1.5 && Math.abs(visual - curTf) > 1) {
-          const scale = style.fontSize / visual;
-          for (let j = textIndex; j >= range2.bt; j--) {
-            if (instructions[j].operator === 'Tm' && instructions[j].operands.length >= 6) {
-              for (const idx of [0, 1, 2, 3]) {
-                const n = instructions[j].operands[idx];
-                if (n instanceof PDFNumber) {
-                  instructions[j].operands[idx] = new PDFNumber(n.value * scale);
-                }
-              }
-              break;
-            }
-          }
-        } else {
-          instructions[i].operands[1] = new PDFNumber(style.fontSize);
-        }
-      }
-      if (fontKey) {
-        instructions[i].operands[0] = new PDFName(fontKey);
-      }
+      tfIdx = i;
       break;
     }
   }
+  const tfInBt = tfIdx >= range2.bt;
+
+  // Tiny Tf with the size carried by Tm (Tf 1 + scaled Tm): scale the Tm.
+  if (style.fontSize != null && tfInBt) {
+    const tfSize = instructions[tfIdx].operands[1];
+    const curTf = tfSize instanceof PDFNumber ? tfSize.value : run.fontSize;
+    const visual = visualFontSize(run);
+    if (curTf > 0 && curTf <= 1.5 && Math.abs(visual - curTf) > 1) {
+      const scale = style.fontSize / visual;
+      for (let j = textIndex; j >= range2.bt; j--) {
+        if (instructions[j].operator === 'Tm' && instructions[j].operands.length >= 6) {
+          for (const idx of [0, 1, 2, 3]) {
+            const n = instructions[j].operands[idx];
+            if (n instanceof PDFNumber) {
+              instructions[j].operands[idx] = new PDFNumber(n.value * scale);
+            }
+          }
+          break;
+        }
+      }
+      if (!fontKey) return;
+      style = { ...style, fontSize: undefined };
+    }
+  }
+  if (style.fontSize == null && !fontKey) return;
+
+  const runShowing = new Set(
+    (run.sourceInstructionIndices ?? []).filter((i) => SHOWING_OPS.has(instructions[i]?.operator)),
+  );
+  runShowing.add(textIndex);
+
+  if (tfInBt && tfIsExclusiveToRun(instructions, tfIdx, runShowing)) {
+    if (style.fontSize != null) instructions[tfIdx].operands[1] = new PDFNumber(style.fontSize);
+    if (fontKey) instructions[tfIdx].operands[0] = new PDFName(fontKey);
+    return;
+  }
+
+  // The Tf is shared with other lines (T* paragraphs, or a font set once for
+  // several text objects): set the new face just for this run and restore
+  // the original afterwards, so only this line changes (BE-102).
+  const origName = tfIdx >= 0 ? instructions[tfIdx].operands[0] : new PDFName(run.fontName);
+  const origSizeOp = tfIdx >= 0 ? instructions[tfIdx].operands[1] : new PDFNumber(run.fontSize);
+  const origSize = origSizeOp instanceof PDFNumber ? origSizeOp.value : run.fontSize;
+  const newName = fontKey ? new PDFName(fontKey) : origName;
+  const newSize = style.fontSize ?? origSize;
+  const lastShow = Math.max(...runShowing);
+  instructions.splice(lastShow + 1, 0, op('Tf', [origName, new PDFNumber(origSize)]));
+  instructions.splice(textIndex, 0, op('Tf', [newName, new PDFNumber(newSize)]));
 }
 
 function widthUpToChar(run: TextRun, charCount: number): number {
@@ -1364,45 +1431,70 @@ function removeUnderlineNearRun(instructions: CSInstruction[], run: TextRun): bo
   return removed;
 }
 
+/**
+ * The column a line sits in: lines that overlap it horizontally share its
+ * left edge, and the right edge is the wider of their right edges and the
+ * page's symmetric right margin.
+ */
+export function alignmentBoundsForLine(
+  line: TextLine,
+  lines: TextLine[],
+  page: PDFPageInfo,
+): { left: number; right: number } {
+  const lineRight = line.x + line.width;
+  const peers = lines.filter((l) => l.x < lineRight && l.x + l.width > line.x);
+  const left = Math.min(line.x, ...peers.map((l) => l.x));
+  const pageRight = page.mediaBox.x + page.mediaBox.width;
+  const symmetricRight = pageRight - (left - page.mediaBox.x);
+  const right = Math.max(symmetricRight, ...peers.map((l) => l.x + l.width));
+  return { left, right: Math.min(right, pageRight) };
+}
+
+/** Move every run of the line so it sits left, centred or right in `bounds`. */
 function applyAlignmentShift(
   contentBytes: Uint8Array,
   line: TextLine,
   align: 'left' | 'center' | 'right',
+  bounds: { left: number; right: number },
 ): Uint8Array {
-  if (align === 'left' || line.runs.length === 0) return contentBytes;
+  if (line.runs.length === 0) return contentBytes;
+  const width = line.width;
+  const span = bounds.right - bounds.left;
+  if (span <= 0) return contentBytes;
 
-  const natural = line.width;
-  const target = line.rightEdge - line.leftMargin;
-  if (target <= 0) return contentBytes;
-
-  let dx = 0;
-  if (align === 'center') dx = (target - natural) / 2;
-  if (align === 'right') dx = target - natural;
+  let targetX = bounds.left;
+  if (align === 'center') targetX = bounds.left + (span - width) / 2;
+  if (align === 'right') targetX = bounds.right - width;
+  const dx = targetX - line.x;
   if (Math.abs(dx) < 0.01) return contentBytes;
 
+  // Bracket the line's text-showing ops in each text object with a pair of
+  // Td moves (+dx before, −dx after). Editing the text object's Tm or Td
+  // instead would also move later lines that position relative to it (T*
+  // paragraphs), aligning the whole paragraph rather than this line.
   const instructions = parseContentStream(contentBytes);
-  const first = line.runs[0];
-  const indices = first.sourceInstructionIndices ?? [];
-  if (indices.length === 0) return contentBytes;
+  const showing = [...new Set(line.runs.flatMap((r) => r.sourceInstructionIndices ?? []))]
+    .filter((i) => SHOWING_OPS.has(instructions[i]?.operator))
+    .sort((a, b) => a - b);
+  if (showing.length === 0) return contentBytes;
 
-  const textIndex = Math.min(...indices);
-  // Prefer adjusting existing Tm/Td rather than inserting a new Td
-  for (let i = textIndex; i >= 0; i--) {
-    if (instructions[i].operator === 'BT') break;
-    if (instructions[i].operator === 'Tm' && instructions[i].operands.length >= 6) {
-      const e = instructions[i].operands[4];
-      const cur = e instanceof PDFNumber ? e.value : 0;
-      instructions[i].operands[4] = new PDFNumber(cur + dx);
-      return compileInstructions(instructions);
-    }
-    if ((instructions[i].operator === 'Td' || instructions[i].operator === 'TD') && instructions[i].operands.length >= 2) {
-      const x = instructions[i].operands[0];
-      const cur = x instanceof PDFNumber ? x.value : 0;
-      instructions[i].operands[0] = new PDFNumber(cur + dx);
-      return compileInstructions(instructions);
-    }
+  const groups = new Map<number, number[]>();
+  for (const i of showing) {
+    const range = findBtEtRange(instructions, i);
+    if (!range) return contentBytes;
+    const list = groups.get(range.bt) ?? [];
+    list.push(i);
+    groups.set(range.bt, list);
   }
-  return contentBytes;
+  // Insert from the end so earlier indices stay valid.
+  const ordered = [...groups.values()].sort((a, b) => b[0] - a[0]);
+  for (const list of ordered) {
+    const first = list[0];
+    const last = list[list.length - 1];
+    instructions.splice(last + 1, 0, op('Td', [new PDFNumber(-dx), new PDFNumber(0)]));
+    instructions.splice(first, 0, op('Td', [new PDFNumber(dx), new PDFNumber(0)]));
+  }
+  return compileInstructions(instructions);
 }
 
 /**
