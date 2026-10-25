@@ -34,9 +34,29 @@ const ROMAN_RE = /^\s*([ivxlcdmIVXLCDM]{1,6})[.)]\s+/;
 const CHECKBOX_RE = /^\s*[\[\(](?:x|X| |_)[\]\)]\s+/;
 const HYPHEN_BREAK_RE = /([A-Za-z]{2,})-\s*$/;
 
+/**
+ * Block text with a newline wherever consecutive runs sit on different
+ * baselines, so reconstructParagraphText can re-join soft wraps with a space
+ * (or remove a wrap hyphen) exactly like the plain-text export.
+ */
 export function blockPlainText(block: Block): string {
   if (!('runs' in block)) return '';
-  return block.runs.map((r) => r.text).join('');
+  let out = '';
+  let prev: Run | undefined;
+  for (const r of block.runs) {
+    if (prev && startsNewLine(prev, r) && !/\s$/.test(out) && !/^\s/.test(r.text)) out += '\n';
+    out += r.text;
+    prev = r;
+  }
+  return out;
+}
+
+function startsNewLine(prev: Run, next: Run): boolean {
+  const a = prev.bbox;
+  const b = next.bbox;
+  if (!a || !b) return false;
+  const tolerance = Math.max(1, Math.min(a.height, b.height) * 0.5);
+  return Math.abs(a.y - b.y) > tolerance;
 }
 
 export function toSemanticRuns(block: Block, styleProfileId?: string): SemanticRun[] {
