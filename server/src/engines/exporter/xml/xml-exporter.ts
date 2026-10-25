@@ -16,10 +16,7 @@ export class XmlExporter {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <document id="${escXml(udm.id)}" version="${escXml(udm.version)}">
   <metadata>
-    <title>${escXml(udm.metadata.title ?? '')}</title>
-    <author>${escXml(udm.metadata.author ?? '')}</author>
-    <language>${escXml(udm.metadata.language ?? '')}</language>
-    <pageCount>${udm.metadata.pageCount}</pageCount>
+${optionalXml('title', udm.metadata.title)}${optionalXml('author', udm.metadata.author)}${optionalXml('language', udm.metadata.language)}    <pageCount>${udm.metadata.pageCount}</pageCount>
   </metadata>
   <body>
 ${content}
@@ -62,4 +59,9 @@ function blockToXml(b: ReturnType<typeof extractContentBlocks>[number]): string 
     case 'link':
       return `    <link href="${escXml(b.uri)}">${escXml(b.text)}</link>`;
   }
+}
+
+/** A metadata element, or nothing when the value is empty. */
+function optionalXml(tag: string, value: string | undefined | null): string {
+  return value && value.trim() ? `    <${tag}>${escXml(value)}</${tag}>\n` : '';
 }
