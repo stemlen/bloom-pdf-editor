@@ -1228,7 +1228,14 @@ function getCanvasFontProperties(
       // on top synthesizes extra stroke and breaks measureText vs PDF Widths
       // (classic Acrobat vs canvas mismatch). Only use CSS weight when the
       // FontFace failed to load and we fall back to a system family.
-      let fallback = `serif, ${INDIC_FONT_FALLBACKS}`;
+      // FontDescriptor /Flags: bit 1 FixedPitch, bit 2 Serif. A face that says
+      // it is neither (e.g. Mukta) falls back to a sans family, so glyphs the
+      // subset lacks don't switch to a serif face mid-word (BE-207).
+      const flags = fontData.flags;
+      const declaredSans = flags !== undefined && (flags & 0b11) === 0;
+      let fallback = declaredSans
+        ? `Helvetica, Arial, sans-serif, ${INDIC_FONT_FALLBACKS}`
+        : `serif, ${INDIC_FONT_FALLBACKS}`;
       if (lower.includes('courier') || lower.includes('mono') || lower.includes('cumberland')) {
         fallback = `"Courier New", Courier, monospace, ${INDIC_FONT_FALLBACKS}`;
       } else if (lower.includes('helv') || lower.includes('arial') || lower.includes('sans') || lower.includes('albany')) {
