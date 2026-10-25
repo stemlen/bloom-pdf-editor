@@ -248,6 +248,9 @@ export function createSignatureFieldAtPoint(
     choiceFlags: 0,
     exportValue: null,
     appearanceState: null,
+    onState: null,
+    options: [],
+    multiline: false,
   };
   return widgetToSignatureField(doc, widget, pageIndex)!;
 }

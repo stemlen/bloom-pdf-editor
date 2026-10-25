@@ -1204,47 +1204,90 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
             ))}
           </div>
 
+          {selectedFormField?.readOnly && (
+            <p className="text-[11px] text-app-faint leading-relaxed" data-testid="form-readonly-note">
+              This field is read-only, so its value can’t be changed.
+            </p>
+          )}
+
           {selectedFormField && selectedFormField.fieldType === 'Tx' && onFormFieldChange && (
             <div className="space-y-2">
-              <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Value</label>
-              <input
-                type="text"
-                value={formFieldDraft}
-                aria-label="Field value"
-                onChange={(e) => onFormFieldChange(e.target.value)}
-                className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary"
-              />
+              <label htmlFor="form-field-value" className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Value</label>
+              {selectedFormField.multiline ? (
+                <textarea
+                  id="form-field-value"
+                  aria-label="Field value"
+                  rows={4}
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60 resize-y"
+                />
+              ) : (
+                <input
+                  id="form-field-value"
+                  aria-label="Field value"
+                  type="text"
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60"
+                />
+              )}
             </div>
           )}
 
-          {selectedFormField && selectedFormField.fieldType === 'Btn' && onFormFieldChange && (
-            <div className="space-y-2">
-              <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Checkbox / Radio</label>
-              <button
-                onClick={() => {
-                  const checked = !(selectedFormField.value === true || selectedFormField.value === 'Yes' || selectedFormField.value === 'On');
-                  onFormFieldChange(checked ? 'Yes' : 'Off');
-                }}
-                className="w-full py-2 rounded-lg text-xs font-semibold bg-panel-elevated border border-app text-app hover:bg-panel-elevated/80"
-              >
-                {(selectedFormField.value === true || selectedFormField.value === 'Yes' || selectedFormField.value === 'On')
-                  ? 'Checked — click to uncheck'
-                  : 'Unchecked — click to check'}
-              </button>
-            </div>
-          )}
+          {selectedFormField && selectedFormField.fieldType === 'Btn' && onFormFieldChange && (() => {
+            const isRadio = (selectedFormField.buttonFlags & (1 << 15)) !== 0;
+            const checked = selectedFormField.value === true || selectedFormField.value === 'Yes' || selectedFormField.value === 'On';
+            const option = selectedFormField.onState && selectedFormField.onState !== 'Yes' ? selectedFormField.onState : null;
+            return (
+              <div className="space-y-2">
+                <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">
+                  {isRadio ? 'Radio button' : 'Check box'}{option ? ` · ${option}` : ''}
+                </label>
+                <button
+                  type="button"
+                  disabled={selectedFormField.readOnly || (isRadio && checked)}
+                  onClick={() => onFormFieldChange(checked ? 'Off' : 'Yes')}
+                  className="w-full py-2 rounded-lg text-xs font-semibold bg-panel-elevated border border-app text-app hover:bg-panel-elevated/80 disabled:opacity-60"
+                >
+                  {isRadio
+                    ? (checked ? 'Selected' : 'Select this option')
+                    : (checked ? 'Checked — click to uncheck' : 'Unchecked — click to check')}
+                </button>
+              </div>
+            );
+          })()}
 
           {selectedFormField && selectedFormField.fieldType === 'Ch' && onFormFieldChange && (
             <div className="space-y-2">
-              <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Choice value</label>
-              <input
-                type="text"
-                value={formFieldDraft}
-                onChange={(e) => onFormFieldChange(e.target.value)}
-                aria-label="Choice value"
-                placeholder="Enter option value"
-                className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary"
-              />
+              <label htmlFor="form-field-choice" className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Option</label>
+              {selectedFormField.options.length > 0 ? (
+                <select
+                  id="form-field-choice"
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60"
+                >
+                  {!selectedFormField.options.includes(formFieldDraft) && (
+                    <option value={formFieldDraft}>{formFieldDraft || 'Choose an option'}</option>
+                  )}
+                  {selectedFormField.options.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="form-field-choice"
+                  type="text"
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60"
+                />
+              )}
             </div>
           )}
           </>

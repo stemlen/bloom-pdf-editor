@@ -2271,6 +2271,7 @@ export default function EditorPage() {
     setFormFieldDraft(value);
     if (!doc || !selectedFormField || !engineRef.current) return;
     const engine = engineRef.current;
+    if (selectedFormField.readOnly) return;
     if (selectedFormField.fieldType === 'Btn') {
       const checked = value === 'true' || value === 'Yes' || value === 'On';
       engine.setButtonFieldValue(doc, selectedFormField, checked);
@@ -2290,8 +2291,9 @@ export default function EditorPage() {
         f.ref.toKey() === selectedFormField.ref.toKey() ? { ...f, value } : f,
       ));
     }
-    setIsDirty(true);
-  }, [doc, selectedFormField]);
+    // Redraw so the regenerated appearance (and radio siblings) show on the canvas.
+    bumpRender();
+  }, [doc, selectedFormField, bumpRender]);
 
   // ── Document-wide search ──
   // Derived from the document during render. Content edits mutate `doc` in

@@ -213,16 +213,32 @@ export async function renderPageToCanvas(
       // appearance streams to avoid rendering text twice on top of itself.
       const subtype = annotDict.get('Subtype');
       const subtypeName = subtype instanceof PDFName ? subtype.name : '';
-      if (subtypeName === 'Link' || subtypeName === 'Widget') continue;
-      
+      if (subtypeName === 'Link') continue;
+      // Signature widgets stay as before: the editor draws placed signatures itself.
+      if (subtypeName === 'Widget') {
+        const parentObj = resolveRef(annotDict.get('Parent') as PDFRef, objects);
+        const ft = annotDict.get('FT') ?? (parentObj instanceof PDFDict ? parentObj.get('FT') : undefined);
+        if (ft instanceof PDFName && ft.name === 'Sig') continue;
+      }
+      // Hidden (F bit 2) and NoView (F bit 6) annotations aren't drawn.
+      const flagsObj = annotDict.get('F');
+      const annotFlags = flagsObj instanceof PDFNumber ? flagsObj.value : 0;
+      if (annotFlags & 0b100010) continue;
+
       const apRef = annotDict.get('AP');
       let apDict = apRef;
       if (apRef instanceof PDFRef) apDict = resolveRef(apRef, objects);
-      
+
       if (apDict instanceof PDFDict) {
         const nRef = apDict.get('N');
         let nStream = nRef;
         if (nRef instanceof PDFRef) nStream = resolveRef(nRef, objects);
+        // Check boxes and radio buttons keep one appearance per state; /AS picks it.
+        if (nStream instanceof PDFDict && !(nStream instanceof PDFStream)) {
+          const asObj = annotDict.get('AS');
+          const state = asObj instanceof PDFName ? nStream.get(asObj.name) : undefined;
+          nStream = state instanceof PDFRef ? resolveRef(state, objects) : state;
+        }
         
         if (nStream instanceof PDFStream) {
           // Interpret this Appearance stream

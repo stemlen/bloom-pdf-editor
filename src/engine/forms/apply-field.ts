@@ -8,7 +8,9 @@ import {
   PDFArray,
   PDFBoolean,
   PDFDict,
+  PDFHexString,
   PDFName,
+  PDFNumber,
   PDFObject,
   PDFRef,
   PDFString,
@@ -16,6 +18,8 @@ import {
 } from '../types';
 import type { AcroFormWidget } from './types';
 import { flattenWidgets } from './flatten-field';
+import { onStateName } from './detect-fields';
+import { regenerateTextAppearance } from './text-appearance';
 
 function stringToBytes(str: string): Uint8Array {
   const bytes = new Uint8Array(str.length);
@@ -35,6 +39,62 @@ export function fieldDictForWidget(widget: AcroFormWidget, objects: Map<string, 
   return parent instanceof PDFDict ? parent : dict;
 }
 
+/**
+ * Encode a PDF text string: printable ASCII stays a literal string; anything
+ * else (newlines, curly quotes, accents, non-Latin scripts) becomes UTF-16BE
+ * with a byte-order mark, which every conforming reader decodes.
+ */
+export function encodeTextString(value: string): PDFString | PDFHexString {
+  if (/^[\x20-\x7e]*$/.test(value) && !/[()\\]/.test(value)) return new PDFString(value);
+  let hex = 'FEFF';
+  for (let i = 0; i < value.length; i++) hex += value.charCodeAt(i).toString(16).padStart(4, '0').toUpperCase();
+  return new PDFHexString(hex);
+}
+
+/** Widget dictionaries that belong to the same terminal field (radio group siblings). */
+function siblingWidgets(field: PDFDict, objects: Map<string, PDFObject>): PDFDict[] {
+  const kids = resolveRef(field.get('Kids') as PDFObject, objects);
+  if (!(kids instanceof PDFArray)) return [field];
+  const out: PDFDict[] = [];
+  for (const kid of kids.items) {
+    const dict = resolveRef(kid, objects);
+    if (dict instanceof PDFDict) out.push(dict);
+  }
+  return out;
+}
+
+/**
+ * Make sure /AcroForm /DR defines the fonts that /DA strings name by
+ * convention (Helv, ZaDb), so viewers that rebuild appearances don't warn
+ * about unknown fonts.
+ */
+function ensureDefaultResources(doc: PDFDocumentData): void {
+  let acro = doc.catalog.get('AcroForm');
+  if (acro instanceof PDFRef) acro = resolveRef(acro, doc.objects);
+  if (!(acro instanceof PDFDict)) return;
+  let dr = resolveRef(acro.get('DR') as PDFObject, doc.objects);
+  if (!(dr instanceof PDFDict)) {
+    dr = new PDFDict();
+    acro.set('DR', dr);
+  }
+  let fonts = resolveRef((dr as PDFDict).get('Font') as PDFObject, doc.objects);
+  if (!(fonts instanceof PDFDict)) {
+    fonts = new PDFDict();
+    (dr as PDFDict).set('Font', fonts);
+  }
+  const add = (key: string, base: string, encoding?: string) => {
+    if ((fonts as PDFDict).has(key)) return;
+    const font = new PDFDict();
+    font.set('Type', new PDFName('Font'));
+    font.set('Subtype', new PDFName('Type1'));
+    font.set('BaseFont', new PDFName(base));
+    if (encoding) font.set('Encoding', new PDFName(encoding));
+    (fonts as PDFDict).set(key, font);
+  };
+  add('Helv', 'Helvetica', 'WinAnsiEncoding');
+  add('ZaDb', 'ZapfDingbats');
+}
+
 /** Set a field's /V value in the object graph. */
 export function setFormFieldValue(
   doc: PDFDocumentData,
@@ -43,11 +103,25 @@ export function setFormFieldValue(
 ): void {
   const dict = widget.dict;
   const field = fieldDictForWidget(widget, doc.objects);
+  if (widget.readOnly) return;
+  ensureDefaultResources(doc);
   if (typeof value === 'boolean') {
-    field.set('V', new PDFName(value ? 'Yes' : 'Off'));
-    dict.set('AS', new PDFName(value ? 'Yes' : 'Off'));
+    const onName = onStateName(dict, doc.objects) ?? widget.onState ?? 'Yes';
+    const ff = field.get('Ff') instanceof PDFNumber ? (field.get('Ff') as PDFNumber).value : widget.buttonFlags;
+    const isRadio = (ff & (1 << 15)) !== 0;
+    field.set('V', new PDFName(value ? onName : 'Off'));
+    if (field !== dict || isRadio) {
+      // Radio buttons (and check boxes with several widgets) share one value:
+      // only widgets whose on-state matches it are shown as on.
+      for (const sibling of siblingWidgets(field, doc.objects)) {
+        const siblingOn = onStateName(sibling, doc.objects);
+        sibling.set('AS', new PDFName(value && siblingOn === onName ? onName : 'Off'));
+      }
+    }
+    dict.set('AS', new PDFName(value ? onName : 'Off'));
   } else {
-    field.set('V', new PDFString(value));
+    field.set('V', encodeTextString(value));
+    regenerateTextAppearance(doc, widget, value);
     // The widget's stored appearance still shows the old text; ask viewers to rebuild it.
     let acro = doc.catalog.get('AcroForm');
     if (acro instanceof PDFRef) acro = resolveRef(acro, doc.objects);

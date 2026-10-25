@@ -73,8 +73,18 @@ function buildWidget(
   fieldType: AcroFormFieldType,
   pageRef: PDFRef | null,
   objects: Map<string, PDFObject>,
+  parent?: PDFDict,
 ): AcroFormWidget {
-  const ff = intVal(dict.get('Ff'));
+  // Ff and Opt are inheritable; split widgets usually carry them on the parent field.
+  const ff = intVal(dict.get('Ff') ?? parent?.get('Ff'));
+  const optObj = resolveRef((dict.get('Opt') ?? parent?.get('Opt')) as PDFObject, objects);
+  const options = optObj instanceof PDFArray
+    ? optObj.items.map((item) => {
+      const entry = resolveRef(item, objects);
+      // Each entry is a text string or an [export, display] pair.
+      return entry instanceof PDFArray ? strVal(entry.get(1) ?? entry.get(0)) : strVal(entry);
+    })
+    : [];
   const rect = parseWidgetRect(dict);
   const v = dict.get('V');
   let value: string | boolean | string[] | null = null;
@@ -84,6 +94,10 @@ function buildWidget(
     // Signature fields store /V → Sig dictionary ref
     value = fieldType === 'Sig' ? `[Sig:${v.toKey()}]` : null;
   }
+
+  // A check box or radio widget is on when its /AS isn't /Off.
+  const asState = dict.get('AS');
+  if (fieldType === 'Btn' && asState instanceof PDFName) value = asState.name !== 'Off';
 
   const mk = dict.get('MK');
   const mkDict = mk instanceof PDFRef ? resolveRef(mk, objects) : mk;
@@ -108,13 +122,24 @@ function buildWidget(
     required: (ff & 2) !== 0,
     buttonFlags: fieldType === 'Btn' ? ff : 0,
     choiceFlags: fieldType === 'Ch' ? ff : 0,
-    exportValue: dict.get('Opt') ? strVal(
-      dict.get('Opt') instanceof PDFArray
-        ? (dict.get('Opt') as PDFArray).get(0)
-        : dict.get('Opt'),
-    ) : null,
+    exportValue: fieldType === 'Btn' ? onStateName(dict, objects) : null,
     appearanceState: dict.get('AS') instanceof PDFName ? (dict.get('AS') as PDFName).name : null,
+    onState: fieldType === 'Btn' ? onStateName(dict, objects) : null,
+    options: fieldType === 'Ch' ? options : [],
+    multiline: fieldType === 'Tx' && (ff & (1 << 12)) !== 0,
   };
+}
+
+/** The "on" state of a check box or radio widget: the /AP /N key that isn't /Off. */
+export function onStateName(dict: PDFDict, objects: Map<string, PDFObject>): string | null {
+  const ap = resolveRef(dict.get('AP') as PDFObject, objects);
+  if (!(ap instanceof PDFDict)) return null;
+  for (const variant of ['N', 'D']) {
+    const states = resolveRef(ap.get(variant) as PDFObject, objects);
+    if (!(states instanceof PDFDict)) continue;
+    for (const key of states.keys()) if (key !== 'Off') return key;
+  }
+  return null;
 }
 
 function widgetBorderWidth(dict: PDFDict, objects: Map<string, import('../types').PDFObject>): number {
@@ -171,7 +196,7 @@ function walkField(
         const kidFt = fieldTypeFromFT(kidObj.get('FT') ?? obj.get('FT'));
         const widget = buildWidget(
           kidObj, kidRef, fullName || partial, kidFt,
-          resolvePageRef(kidObj, objects), objects,
+          resolvePageRef(kidObj, objects), objects, obj,
         );
         // Split field/widget pairs keep /V on the parent field.
         if (widget.value === null) {
