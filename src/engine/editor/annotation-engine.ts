@@ -648,6 +648,22 @@ export function addAnnotationToPage(
 
   // Store the annotation object
   objects.set(annotRef.toKey(), annotDict);
+
+  // Streams must be indirect objects (ISO 32000-2 §7.3.8). An inline /AP /N
+  // stream is lost when the file is reopened, which made Bloom's own strokes
+  // and highlights disappear; store it as its own object.
+  const ap = annotDict.get('AP');
+  if (ap instanceof PDFDict) {
+    for (const key of ['N', 'R', 'D']) {
+      const stream = ap.get(key);
+      if (!(stream instanceof PDFStream)) continue;
+      let max = 0;
+      for (const k of objects.keys()) max = Math.max(max, parseInt(k.split('_')[0], 10) || 0);
+      const ref = new PDFRef(max + 1, 0);
+      objects.set(ref.toKey(), stream);
+      ap.set(key, ref);
+    }
+  }
 }
 
 /**

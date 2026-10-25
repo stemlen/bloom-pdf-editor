@@ -3298,15 +3298,12 @@ export default function EditorPage() {
 
         if (!annotation) continue;
 
-        const { dict, appearanceStream } = engine.createAnnotationDict(annotation, currentObjNum++);
-        if (appearanceStream) {
-          doc.objects.set(`${currentObjNum}_0`, appearanceStream as import('@/engine').PDFObject);
-          currentObjNum++;
-        }
+        // addAnnotationToPage stores the appearance stream as its own object.
+        const { dict } = engine.createAnnotationDict(annotation, currentObjNum++);
 
         const annotRef = new engine.PDFRef(currentObjNum, 0);
         engine.addAnnotationToPage(page.dict, dict, annotRef, doc.objects);
-        currentObjNum++;
+        currentObjNum = engine.getNextObjNum(doc);
       }
 
       if (fTexts.length > 0 || fImages.length > 0) {
@@ -3520,14 +3517,11 @@ export default function EditorPage() {
       }
 
       if (annotation) {
-        const { dict, appearanceStream } = engine.createAnnotationDict(annotation, currentObjNum++);
-        if (appearanceStream) {
-          exportDoc.objects.set(`${currentObjNum}_0`, appearanceStream as import('@/engine').PDFObject);
-          currentObjNum++;
-        }
+        // addAnnotationToPage stores the appearance stream as its own object.
+        const { dict } = engine.createAnnotationDict(annotation, currentObjNum++);
         const annotRef = new engine.PDFRef(currentObjNum, 0);
         engine.addAnnotationToPage(page.dict, dict, annotRef, exportDoc.objects);
-        currentObjNum++;
+        currentObjNum = engine.getNextObjNum(exportDoc);
       }
     }
 
