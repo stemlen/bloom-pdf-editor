@@ -66,19 +66,31 @@ export function Toolbar({
   doc,
   onCompressedDownload,
 }: ToolbarProps) {
+  /** Ask before leaving the editor while there are edits not yet downloaded. */
+  const confirmLeave = () =>
+    !isDirty || window.confirm('You have unsaved changes. Leave without downloading them?');
+
   return (
     <header className="flex items-center justify-between gap-2 px-2 md:px-4 h-12 md:h-[58px] bg-background/85 backdrop-blur-xl border-b border-border shrink-0 z-40">
       {/* ── Left: close + logo + filename ── */}
       <div className="flex items-center gap-1 md:gap-2 min-w-0 shrink">
         <button
-          onClick={onClose}
+          onClick={() => {
+            if (confirmLeave()) onClose();
+          }}
           className="w-8 h-8 md:w-9 md:h-9 flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors shrink-0"
           title="Close file & return home"
           aria-label="Close file & return home"
         >
           <X size={18} />
         </button>
-        <Link href="/" aria-label="BloomPDF Editor home" className="hidden sm:flex items-center shrink-0 overflow-visible md:mr-5">
+        <Link
+          href="/"
+          onClick={(e) => {
+            if (!confirmLeave()) e.preventDefault();
+          }}
+          aria-label="BloomPDF Editor home"
+          className="hidden sm:flex items-center shrink-0 overflow-visible md:mr-5">
           <LogoMark size={26} className="md:hidden" />
           <span className="hidden md:flex -ml-1">
             <Logo variant="nav" />
