@@ -4957,6 +4957,16 @@ export default function EditorPage() {
     targetBytes?: number;
   }) => {
     if (!doc || !engineRef.current) return;
+    if (hasDigitalSignature(doc.rawBytes)) {
+      const compressAnyway = window.confirm(
+        'This PDF is digitally signed. Compressing rewrites the file, which removes the signature.\n\n' +
+          'Choose OK to compress anyway, or Cancel to download the signed PDF without compression.',
+      );
+      if (!compressAnyway) {
+        await handleDownload();
+        return;
+      }
+    }
     try {
       setIsSaving(true);
       setError(null);
@@ -5016,7 +5026,7 @@ export default function EditorPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, fileName, createExportDocWithOverlays]);
+  }, [doc, currentPage, fileName, createExportDocWithOverlays, handleDownload]);
 
   const handleClose = useCallback(async () => {
     await clearEditorSession();
@@ -6967,4 +6977,16 @@ export default function EditorPage() {
       />
     </div>
   );
+}
+
+/** True when the file contains a digital signature (a signature dictionary with /ByteRange). */
+function hasDigitalSignature(bytes: Uint8Array | ArrayBuffer | null | undefined): boolean {
+  if (!bytes) return false;
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const needle = [0x2f, 0x42, 0x79, 0x74, 0x65, 0x52, 0x61, 0x6e, 0x67, 0x65]; // "/ByteRange"
+  outer: for (let i = 0; i <= view.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (view[i + j] !== needle[j]) continue outer;
+    return true;
+  }
+  return false;
 }
