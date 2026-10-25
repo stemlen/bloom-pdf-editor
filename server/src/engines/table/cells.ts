@@ -1,5 +1,6 @@
 import { createId } from '../../utils/id.js';
 import { bboxFromPoints, type BoundingBox } from '../common/geometry.js';
+import type { RawPage } from '../parser/raw-model.js';
 import type { SemanticNode, SemanticRun } from '../semantic/types.js';
 import type { ICellFiller, ICellMerger, TableEngineInput } from './algorithms/types.js';
 import type { LogicalCell, TableCandidate, TableGrid } from './types.js';
@@ -28,7 +29,17 @@ export class CellFiller implements ICellFiller {
       }
     }
 
-    for (const id of candidate.nodeIds) {
+    const words = ruledRowWords(grid, candidate, input);
+    if (words) {
+      for (const w of words) {
+        const col = findIndex(grid.xs, w.bbox!.x + w.bbox!.width / 2);
+        const row = findRowIndex(rowBands, w.bbox!.y + w.bbox!.height / 2);
+        if (col < 0 || row < 0) continue;
+        buckets.get(`${row},${col}`)?.push(w);
+      }
+    }
+
+    for (const id of words ? [] : candidate.nodeIds) {
       const node = input.semantic.nodes[id];
       if (!node?.bbox) continue;
       const cx = node.bbox.x + node.bbox.width / 2;
@@ -49,9 +60,11 @@ export class CellFiller implements ICellFiller {
           .filter(Boolean)
           .join(' ')
           .trim();
-        const runs: SemanticRun[] = nodes.flatMap((n) =>
+        const allRuns: SemanticRun[] = nodes.flatMap((n) =>
           'runs' in n && Array.isArray(n.runs) ? n.runs : [],
         );
+        // Word-split cells carry one run per word; keep a single styled run.
+        const runs = words && allRuns[0] ? [{ ...allRuns[0], text }] : allRuns;
         const contentBBox = nodes.some((n) => n.bbox)
           ? bboxFromPoints(
               nodes.flatMap((n) =>
@@ -79,7 +92,7 @@ export class CellFiller implements ICellFiller {
           runs,
           alignment: inferAlign(nodes, bbox),
           padding: { top: 2, right: 2, bottom: 2, left: 2 },
-          contentNodeIds: nodes.map((n) => n.id),
+          contentNodeIds: [...new Set(nodes.map((n) => n.id))],
           confidence: nodes.length ? 0.85 : 0.4,
         });
       }
@@ -157,6 +170,92 @@ export class CellMerger implements ICellMerger {
 
     return cells.filter((c) => !absorbed.has(c.id));
   }
+}
+
+/**
+ * When a text node runs across a ruled column line (a whole table row read as
+ * one line), split it back into cells using the parser's word positions.
+ * Words are wrapped as paragraph-shaped nodes carrying the row's run style.
+ */
+function ruledRowWords(
+  grid: TableGrid,
+  candidate: TableCandidate,
+  input: TableEngineInput,
+): SemanticNode[] | null {
+  if (grid.kind === 'borderless') return null;
+  const inner = grid.xs.slice(1, -1);
+  const nodes = candidate.nodeIds
+    .map((id) => input.semantic.nodes[id])
+    .filter((n): n is SemanticNode => !!n?.bbox);
+  const spans = nodes.some((n) =>
+    inner.some((x) => n.bbox!.x < x - 2 && n.bbox!.x + n.bbox!.width > x + 2),
+  );
+  if (!spans) return null;
+  const page = input.raw.pages.find((p) => p.index === candidate.pageIndex);
+  if (!page) return null;
+  const pageWords = page.words.length > 0 ? page.words : wordsFromCharacters(page.characters);
+
+  const out: SemanticNode[] = [];
+  for (const w of pageWords) {
+    const cx = w.bbox.x + w.bbox.width / 2;
+    const cy = w.bbox.y + w.bbox.height / 2;
+    const b = candidate.bbox;
+    if (cx < b.x || cx > b.x + b.width || cy < b.y || cy > b.y + b.height) continue;
+    if (!w.text.trim()) continue;
+    const onLine = (n: SemanticNode) => cy >= n.bbox!.y - 1 && cy <= n.bbox!.y + n.bbox!.height + 1;
+    const source =
+      nodes.find((n) => onLine(n) && cx >= n.bbox!.x - 1 && cx <= n.bbox!.x + n.bbox!.width + 1) ??
+      nodes.find(onLine);
+    const style = source && 'runs' in source && Array.isArray(source.runs) ? source.runs[0] : undefined;
+    out.push({
+      id: source?.id ?? w.id,
+      type: 'paragraph',
+      parentId: null,
+      childIds: [],
+      // Top-to-bottom, then left-to-right, so words join in reading order.
+      readingOrderIndex: -w.bbox.y * 10_000 + w.bbox.x,
+      confidence: 0.85,
+      pageIndex: candidate.pageIndex,
+      bbox: w.bbox,
+      sourceBlockIds: source?.sourceBlockIds ?? [],
+      text: w.text,
+      runs: [{ ...(style ?? {}), id: createId('srun'), text: w.text }],
+    } as SemanticNode);
+  }
+  return out.length > 0 ? out : null;
+}
+
+/** Group characters into words at spaces, line changes and wide gaps. */
+function wordsFromCharacters(
+  chars: RawPage['characters'],
+): Array<{ id: string; text: string; bbox: BoundingBox }> {
+  const words: Array<{ id: string; text: string; bbox: BoundingBox }> = [];
+  let cur: { id: string; text: string; bbox: BoundingBox } | null = null;
+  for (const ch of chars) {
+    const text = ch.unicode ?? '';
+    if (!text.trim()) {
+      cur = null;
+      continue;
+    }
+    const b = ch.bbox;
+    if (
+      cur &&
+      Math.abs(cur.bbox.y - b.y) <= ch.fontSize * 0.3 &&
+      b.x - (cur.bbox.x + cur.bbox.width) <= ch.fontSize * 0.25 &&
+      b.x >= cur.bbox.x
+    ) {
+      const right = Math.max(cur.bbox.x + cur.bbox.width, b.x + b.width);
+      const top = Math.max(cur.bbox.y + cur.bbox.height, b.y + b.height);
+      cur.bbox = { x: cur.bbox.x, y: Math.min(cur.bbox.y, b.y), width: 0, height: 0 };
+      cur.bbox.width = right - cur.bbox.x;
+      cur.bbox.height = top - cur.bbox.y;
+      cur.text += text;
+    } else {
+      cur = { id: ch.id, text, bbox: { ...b } };
+      words.push(cur);
+    }
+  }
+  return words;
 }
 
 function buildRowBands(ys: number[]): Array<{ lo: number; hi: number }> {
