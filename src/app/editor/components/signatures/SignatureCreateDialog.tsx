@@ -70,6 +70,9 @@ export function SignatureCreateDialog({ open, onOpenChange, onSave }: SignatureC
   if (open !== wasOpen) {
     setWasOpen(open);
     if (open) {
+      // Each new signature starts with a fresh name and text.
+      setName('My signature');
+      setTypedText('');
       setUploadPreview(null);
       setUploadDims(null);
       setError(null);

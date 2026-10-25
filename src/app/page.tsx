@@ -16,7 +16,7 @@ const SITE_URL = 'https://bloompdf.app';
 
 const FEATURES = [
   { cat: 'edit', title: 'Edit text in place', body: 'Click any line to rewrite it in the original font.' },
-  { cat: 'organize', title: 'Pages & images', body: 'Add, move, rotate and delete pages, images and shapes.' },
+  { cat: 'organize', title: 'Pages & images', body: 'Add, move, rotate and delete pages; place images and draw shapes.' },
   { cat: 'security', title: 'Fill, sign & protect', body: 'Forms, signatures, redaction, passwords and watermarks.' },
   { cat: 'convert-from', title: 'Export anywhere', body: 'Word, Excel, PowerPoint, HTML, Markdown, images…' },
 ];
