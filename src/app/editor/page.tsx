@@ -6141,7 +6141,9 @@ export default function EditorPage() {
               })}
 
             {/* DOM overlays for FloatingText */}
-            {activeTool === 'watermark' && watermarkLivePreview && (
+            {/* Preview only on pages the watermark will be applied to (BE-314). */}
+            {activeTool === 'watermark' && watermarkLivePreview &&
+              currentPage + 1 >= watermarkPageFrom && currentPage + 1 <= watermarkPageTo && (
               <WatermarkPreview
                 doc={doc}
                 currentPage={currentPage}
