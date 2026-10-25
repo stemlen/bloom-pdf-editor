@@ -33,8 +33,10 @@ export default function DebugPage() {
       const pdfBytes = new Uint8Array(buffer);
       const parsed = await engineRef.current.parsePDF(pdfBytes);
       setSummary(
-        `Parsed ${file.name}: ${parsed.pages.length} page(s), PDF ${parsed.version}. ` +
-          `Document conversion runs in the Export panel.`,
+        [
+          `Parsed ${file.name}: ${parsed.pages.length} ${parsed.pages.length === 1 ? 'page' : 'pages'}, PDF ${parsed.version}.`,
+          'Document conversion runs in the Export panel.',
+        ].join(' '),
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
