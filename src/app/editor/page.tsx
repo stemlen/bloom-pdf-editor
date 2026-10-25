@@ -322,6 +322,8 @@ export default function EditorPage() {
   const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
 
   const [activeTool, setActiveTool] = useState<EditorTool>('text');
+  /** Redaction marks placed on the current page and not applied yet. */
+  const [redactionMarkCount, setRedactionMarkCount] = useState(0);
   const [isPanelOpen, setIsPanelOpen] = useState(true);
   const isMobile = useIsMobile();
   const [showMobileThumbnails, setShowMobileThumbnails] = useState(false);
@@ -1120,6 +1122,7 @@ export default function EditorPage() {
     setEditText('');
     setSelectedDisplayItem(null);
     setDisplayItems([]);
+    setRedactionMarkCount(0);
     /* eslint-enable react-hooks/set-state-in-effect */
     spatialIndexRef.current = null;
   }, [doc, currentPage, setEditingLine]);
@@ -2792,6 +2795,24 @@ export default function EditorPage() {
         setActiveFloatingImageId(null);
         setSelectedSignatureId(null);
       }
+    } else if (activeTool === 'redact') {
+      const hit = hitTestTextLine(pdfX, pdfY, renderResult.textLines);
+      if (hit && engineRef.current) {
+        const b = getLineBounds(hit);
+        try {
+          ensureHistoryBaseline(currentPage);
+          engineRef.current.markRedaction(doc, currentPage, [
+            b.x, b.y + b.height, b.x + b.width, b.y + b.height,
+            b.x, b.y, b.x + b.width, b.y,
+          ]);
+          pushEditorHistory('redact-mark');
+          setRedactionMarkCount(n => n + 1);
+          setIsDirty(true);
+          setRenderKey(k => k + 1);
+        } catch (err) {
+          console.warn('[Editor] Mark redaction failed:', err);
+        }
+      }
     } else if (activeTool === 'addtext') {
       if (blurTimeoutRef.current) {
         clearTimeout(blurTimeoutRef.current);
@@ -3887,6 +3908,50 @@ export default function EditorPage() {
     // The popover unmounts under the pointer, so its mouseleave never fires.
     linkPopoverHoverRef.current = false;
   }, []);
+
+  const scanPageLinks = useCallback(() => {
+    if (!doc || !engineRef.current) return;
+    try {
+      setPageLinks(engineRef.current.listPageLinks(doc, currentPage));
+      setLinksHighlighted(true);
+      setLinkCreatePending(false);
+      closeLinkPopover();
+    } catch (err) {
+      console.warn('[Editor] Scan links failed:', err);
+    }
+  }, [doc, currentPage, closeLinkPopover]);
+
+  /**
+   * Toolbar selection. Link is not a separate canvas mode: it opens Edit Text
+   * with the page's links highlighted, where links are added and edited.
+   */
+  const selectTool = useCallback((tool: EditorTool) => {
+    if (tool === 'link') {
+      setActiveTool('text');
+      setIsPanelOpen(true);
+      scanPageLinks();
+      return;
+    }
+    setActiveTool(tool);
+  }, [scanPageLinks]);
+
+  const handleApplyRedactions = useCallback(async () => {
+    if (!doc || !engineRef.current) return;
+    if (!window.confirm('Permanently remove the marked content on this page? This cannot be undone after you download the PDF.')) return;
+    try {
+      setIsSaving(true);
+      ensureHistoryBaseline(currentPage);
+      await engineRef.current.applyRedactions(doc, currentPage);
+      pushEditorHistory('apply-redactions');
+      setRedactionMarkCount(0);
+      setIsDirty(true);
+      setRenderKey(k => k + 1);
+    } catch (err) {
+      setError(`Couldn't apply redactions: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  }, [doc, currentPage, ensureHistoryBaseline, pushEditorHistory, setIsDirty]);
 
   const saveLinkFromPopover = useCallback(async (andClose = true) => {
     if (!doc || !engineRef.current || !selectedLink) {
@@ -5338,6 +5403,10 @@ export default function EditorPage() {
         }
         setFloatingImages(prev => prev.filter(p => p.id !== activeFloatingImageId));
         setActiveFloatingImageId(null);
+      } else if (e.key === 'r' || e.key === 'R') {
+        if (!e.metaKey && !e.ctrlKey) setActiveTool('redact');
+      } else if (e.key === 'l' || e.key === 'L') {
+        if (!e.metaKey && !e.ctrlKey) selectTool('link');
       } else if (e.key === 'w' || e.key === 'W') {
         if (!e.metaKey && !e.ctrlKey) setActiveTool('watermark');
       } else if (e.key === 'x' || e.key === 'X') {
@@ -5352,7 +5421,7 @@ export default function EditorPage() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures]);
+  }, [selectTool, goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures]);
 
   // ── Global clipboard paste listener for images (Ctrl+V on Windows / Cmd+V on Mac) ──
   useEffect(() => {
@@ -5674,7 +5743,7 @@ export default function EditorPage() {
         {/* ── Left sidebar (Tools only) — on mobile renders as fixed bottom strip ── */}
         <ToolsSidebar
           activeTool={activeTool}
-          setActiveTool={setActiveTool}
+          setActiveTool={selectTool}
           highlightColor={highlightColor}
           isPanelOpen={isPanelOpen}
           onTogglePanel={() => setIsPanelOpen(v => !v)}
@@ -5698,7 +5767,7 @@ export default function EditorPage() {
           ) : (
             <PropertiesSidebar
               activeTool={activeTool}
-              setActiveTool={setActiveTool}
+              setActiveTool={selectTool}
               onClose={() => setIsPanelOpen(false)}
               selectedRun={selectedLine?.runs[0] ?? null}
           textFontFamily={textFontFamily}
@@ -5731,21 +5800,7 @@ export default function EditorPage() {
           setEraserSize={setEraserSize}
           pageLinkCount={pageLinks.length}
           linksHighlighted={linksHighlighted}
-          onScanLinks={() => {
-            if (!doc || !engineRef.current) return;
-            try {
-              const links = engineRef.current.listPageLinks(doc, currentPage);
-              setPageLinks(links);
-              setLinksHighlighted(true);
-              setLinkCreatePending(false);
-              closeLinkPopover();
-              if (links.length === 0) {
-                window.alert('No links found on this page.');
-              }
-            } catch (err) {
-              console.warn('[Editor] Scan links failed:', err);
-            }
-          }}
+          onScanLinks={scanPageLinks}
           hasSelectedLink={false}
           linkCreatePending={linkCreatePending}
           selectedLinkUrl={linkDraftUrl}
@@ -5827,6 +5882,8 @@ export default function EditorPage() {
           onFlattenForms={handleFlattenForms}
           onDuplicateLineBelow={handleDuplicateLineBelow}
           onRecognizeText={() => void handleRecognizeText()}
+          redactionMarkCount={redactionMarkCount}
+          onApplyRedactions={() => void handleApplyRedactions()}
           tableInfo={selectedTableCell ? {
             rows: selectedTableCell.table.rows,
             cols: selectedTableCell.table.cols,

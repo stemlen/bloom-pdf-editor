@@ -3,7 +3,7 @@ import {
   Type, TextCursorInput, Image, PenTool, Highlighter, Eraser, MousePointer2,
   X, Trash2, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, Minus, Plus, Stamp, Link2,
   PenLine, Star, Copy, Lock, Unlock, RotateCw, KeyRound, ShieldCheck,
-  ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles, ScanText,
+  ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles, ScanText, SquareSlash,
 } from 'lucide-react';
 import type { DrawMode, EditorTool, RemovedImageRecord } from '../types';
 import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry, WatermarkPosition } from '@/engine';
@@ -83,6 +83,9 @@ interface PropertiesSidebarProps {
   onDuplicateLineBelow?: () => void;
   /** Run OCR on the current page and insert the recognized text. */
   onRecognizeText?: () => void;
+  /** Redaction marks waiting to be applied on this page. */
+  redactionMarkCount?: number;
+  onApplyRedactions?: () => void;
   /** Active cell inside an auto-detected PDF table. */
   tableInfo?: { rows: number; cols: number; row: number; col: number } | null;
   onAddTableRow?: () => void;
@@ -198,6 +201,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
     onFormFieldSelect, onFormFieldChange, onFlattenForms,
     onDuplicateLineBelow,
   onRecognizeText,
+  redactionMarkCount = 0,
+  onApplyRedactions,
     tableInfo = null,
     onAddTableRow,
     onAddTableColumn,
@@ -258,7 +263,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
     return () => window.clearInterval(id);
   }, []);
 
-  if (!['text', 'addtext', 'draw', 'highlight', 'erase', 'select', 'watermark', 'sign'].includes(activeTool)) return null;
+  if (!['text', 'addtext', 'draw', 'highlight', 'erase', 'select', 'watermark', 'sign', 'redact'].includes(activeTool)) return null;
 
   const FONT_FAMILIES = [
     'Helvetica',
@@ -678,6 +683,35 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               Add Image
             </button>
           </div>
+        </div>
+      )}
+
+      {/* REDACT TOOL PROPERTIES */}
+      {activeTool === 'redact' && (
+        <div className="p-4 space-y-4 animate-in fade-in slide-in-from-left-4 duration-300" data-testid="redact-panel">
+          <div className="flex items-center gap-2 text-[11px] font-bold tracking-wider text-foreground uppercase">
+            <SquareSlash size={14} />
+            Redact Properties
+          </div>
+          <p className="text-[11px] text-app-muted leading-relaxed">
+            Click a line of text to mark it for redaction. Marked text is removed from the PDF, not just covered, when you apply the redactions.
+          </p>
+          <div className="text-[11px] font-medium text-app">
+            {redactionMarkCount === 0
+              ? 'No lines marked on this page'
+              : `${redactionMarkCount} ${redactionMarkCount === 1 ? 'line' : 'lines'} marked on this page`}
+          </div>
+          {onApplyRedactions && (
+            <button
+              type="button"
+              onClick={onApplyRedactions}
+              disabled={redactionMarkCount === 0}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:pointer-events-none text-xs font-semibold transition-colors"
+            >
+              <SquareSlash size={14} />
+              Apply Redactions
+            </button>
+          )}
         </div>
       )}
 

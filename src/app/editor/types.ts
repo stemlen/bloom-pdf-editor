@@ -9,6 +9,7 @@ import {
   SecurityToolIcon,
   CustomIconProps
 } from './components/EditorToolIcons';
+import { Link2, SquareSlash } from 'lucide-react';
 
 export type EditorTool = 'select' | 'text' | 'addtext' | 'highlight' | 'draw' | 'erase' | 'watermark' | 'redact' | 'sign' | 'link' | 'security';
 
@@ -25,6 +26,8 @@ export const TOOLS: ToolDef[] = [
   { id: 'highlight', label: 'Highlight', icon: HighlightToolIcon, shortcut: 'H' },
   { id: 'draw',      label: 'Draw',      icon: DrawToolIcon,      shortcut: 'D' },
   { id: 'erase',     label: 'Erase',     icon: EraseToolIcon,     shortcut: 'E' },
+  { id: 'link',      label: 'Link',      icon: Link2,             shortcut: 'L' },
+  { id: 'redact',    label: 'Redact',    icon: SquareSlash,       shortcut: 'R' },
   { id: 'watermark', label: 'Watermark', icon: WatermarkToolIcon, shortcut: 'W' },
   { id: 'sign',      label: 'Sign',      icon: SignToolIcon,      shortcut: 'S' },
   { id: 'security',  label: 'Security',  icon: SecurityToolIcon,  shortcut: 'X' },

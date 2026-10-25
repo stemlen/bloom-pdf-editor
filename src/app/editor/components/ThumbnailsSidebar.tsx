@@ -14,6 +14,7 @@ import {
   Combine,
   Maximize2,
   Minimize2,
+  Files,
 } from 'lucide-react';
 import * as Tooltip from '@radix-ui/react-tooltip';
 
@@ -62,9 +63,12 @@ function IconTip({
   );
 }
 
+const PAGE_ACTION_CLASS =
+  'flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md border border-app bg-panel-elevated text-app text-[11px] font-semibold hover:bg-panel-elevated/80 disabled:opacity-40 disabled:pointer-events-none transition-colors';
+
 const PAGE_CAPABILITIES = [
   { id: 'split', icon: Scissors, label: 'Split pages', color: 'text-contrast', steps: 'Remove unwanted pages using the trash icon, then click Download to save the new PDF.' },
-  { id: 'merge', icon: Combine, label: 'Merge PDFs', color: 'text-contrast', steps: 'Hover between pages and click the "Insert from PDF" icon to append another file, then Download.' },
+  { id: 'merge', icon: Combine, label: 'Merge PDFs', color: 'text-contrast', steps: 'Click Merge PDF to add another file at the end, or hover between pages and use "Insert from PDF", then Download.' },
   { id: 'blank', icon: FilePlus, label: 'Add blank page', color: 'text-app-muted', steps: 'Hover between pages and click the "Add blank page" icon to insert an empty page.' },
   { id: 'insert', icon: FileText, label: 'Insert from PDF', color: 'text-app-muted', steps: 'Hover between pages and click the "Insert from PDF" icon to append pages.' },
   { id: 'reorder', icon: GripVertical, label: 'Re-order pages', color: 'text-app-muted', steps: 'Click and drag any page thumbnail to move it to a new position in the document.' },
@@ -299,6 +303,53 @@ export function ThumbnailsSidebar({
               </Tooltip.Portal>
             </Tooltip.Root>
           </div>
+
+          {(onMergePdf || onSplitCurrentPage || onSplitAllPages || onRemoveCurrentPage) && (
+            <div className={`grid grid-cols-2 gap-1.5 w-full ${isExpanded ? 'max-w-md' : ''}`} data-testid="page-actions">
+              {onMergePdf && (
+                <button
+                  type="button"
+                  onClick={() => mergeInputRef.current?.click()}
+                  className={PAGE_ACTION_CLASS}
+                  title="Add all pages of another PDF at the end"
+                >
+                  <Combine size={12} /> Merge PDF
+                </button>
+              )}
+              {onSplitCurrentPage && (
+                <button
+                  type="button"
+                  onClick={onSplitCurrentPage}
+                  className={PAGE_ACTION_CLASS}
+                  title="Download this page as its own PDF"
+                >
+                  <Scissors size={12} /> Split Page
+                </button>
+              )}
+              {onSplitAllPages && (
+                <button
+                  type="button"
+                  onClick={onSplitAllPages}
+                  disabled={totalPages < 2}
+                  className={PAGE_ACTION_CLASS}
+                  title="Download every page as a separate PDF"
+                >
+                  <Files size={12} /> Split All
+                </button>
+              )}
+              {onRemoveCurrentPage && (
+                <button
+                  type="button"
+                  onClick={onRemoveCurrentPage}
+                  disabled={totalPages < 2}
+                  className={`${PAGE_ACTION_CLASS} hover:text-red-500`}
+                  title={totalPages < 2 ? 'A PDF needs at least one page' : `Remove page ${currentPage + 1}`}
+                >
+                  <Trash2 size={12} /> Remove Page
+                </button>
+              )}
+            </div>
+          )}
 
           {!isGeneratingThumbnails && thumbnails.length > 0 && (
             renderInsertBar(0, 0)
