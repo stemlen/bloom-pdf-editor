@@ -29,6 +29,8 @@ import {
 } from './utils';
 import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
+import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+import { TextBoxPreview } from './components/TextBoxPreview';
 import { findMatchingFlowLine } from './flowLineMatch';
 
 import { Toolbar } from './components/Toolbar';
@@ -524,7 +526,12 @@ export default function EditorPage() {
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
   const [textUnderline, setTextUnderline] = useState(false);
-  const [textAlign, setTextAlign] = useState<'left' | 'center' | 'right'>('left');
+  const [textAlign, setTextAlign] = useState<TextBoxAlign>('left');
+  const [textStrikethrough, setTextStrikethrough] = useState(false);
+  const [textHighlight, setTextHighlight] = useState<string | null>(null);
+  const [textLineHeight, setTextLineHeight] = useState<number>(DEFAULT_TEXT_BOX_STYLE.lineHeight);
+  const [textLetterSpacing, setTextLetterSpacing] = useState<number>(0);
+  const [textList, setTextList] = useState<TextBoxList>('none');
   const [saveMode, setSaveMode] = useState<'quick' | 'optimized'>('optimized');
   const [isDirty, setIsDirtyState] = useState(false);
   /**
@@ -749,7 +756,30 @@ export default function EditorPage() {
   );
 
   // Apply style changes from properties sidebar to the PDF
+  // ── Formatting for added text boxes ──
+  const activeFloatingTextIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    activeFloatingTextIdRef.current = activeFloatingTextId;
+  }, [activeFloatingTextId]);
+  const floatingTextAreaRefs = useRef(new Map<string, HTMLTextAreaElement>());
+  /** Apply a style patch to the active text box; returns false when no box is active. */
+  const patchActiveFloatingText = useCallback((patch: Partial<TextBoxStyle>): boolean => {
+    const id = activeFloatingTextIdRef.current;
+    if (!id) return false;
+    setFloatingTexts(prev => prev.map(p => {
+      if (p.id !== id) return p;
+      const next = { ...p, ...patch };
+      // Keep the box's top edge fixed when the size changes.
+      if (patch.fontSize != null && patch.fontSize !== p.fontSize) next.pdfY = p.pdfY + p.fontSize - patch.fontSize;
+      return next;
+    }));
+    setIsDirty(true);
+    requestAnimationFrame(() => floatingTextAreaRefs.current.get(id)?.focus({ preventScroll: true }));
+    return true;
+  }, []);
+
   const queueOrApplyStyle = useCallback((patch: Partial<TextStyleUI>) => {
+    if (patchActiveFloatingText(patch)) return;
     if (!selectedLine) return;
     if (editingLineRef.current) {
       let sel = editSelRef.current;
@@ -794,7 +824,7 @@ export default function EditorPage() {
       return;
     }
     void applyStyle(patch);
-  }, [selectedLine, applyStyle, resolveEditStyleRange]);
+  }, [selectedLine, applyStyle, resolveEditStyleRange, patchActiveFloatingText]);
 
   const handleEditSelection = useCallback((start: number, end: number) => {
     editSelRef.current = { start, end };
@@ -889,6 +919,7 @@ export default function EditorPage() {
       queueOrApplyStyle({ fontSize: next });
       return next;
     });
+    if (activeFloatingTextIdRef.current) return;
     // Keep the edit box focused after clicking a size preset in the sidebar
     requestAnimationFrame(() => {
       hiddenInputRef.current?.focus({ preventScroll: true });
@@ -901,6 +932,7 @@ export default function EditorPage() {
     }
     setTextFontFamily(v);
     queueOrApplyStyle({ fontFamily: v });
+    if (activeFloatingTextIdRef.current) return;
     requestAnimationFrame(() => {
       hiddenInputRef.current?.focus({ preventScroll: true });
     });
@@ -909,10 +941,57 @@ export default function EditorPage() {
     setTextColor(v);
     queueOrApplyStyle({ color: v });
   }, [queueOrApplyStyle]);
-  const handleTextAlign = useCallback((v: 'left' | 'center' | 'right') => {
+  const handleTextAlign = useCallback((v: TextBoxAlign) => {
     setTextAlign(v);
-    queueOrApplyStyle({ align: v });
-  }, [queueOrApplyStyle]);
+    if (patchActiveFloatingText({ align: v })) return;
+    // Existing PDF lines are single lines, so justify has nothing to spread.
+    if (v !== 'justify') queueOrApplyStyle({ align: v });
+  }, [queueOrApplyStyle, patchActiveFloatingText]);
+  const handleTextStrikethrough = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setTextStrikethrough(prev => {
+      const next = typeof v === 'function' ? v(prev) : v;
+      patchActiveFloatingText({ strikethrough: next });
+      return next;
+    });
+  }, [patchActiveFloatingText]);
+  const handleTextHighlight = useCallback((v: string | null) => {
+    setTextHighlight(v);
+    patchActiveFloatingText({ highlight: v });
+  }, [patchActiveFloatingText]);
+  const handleTextLineHeight = useCallback((v: number) => {
+    const next = Math.max(0.8, Math.min(3, Math.round(v * 100) / 100));
+    setTextLineHeight(next);
+    patchActiveFloatingText({ lineHeight: next });
+  }, [patchActiveFloatingText]);
+  const handleTextLetterSpacing = useCallback((v: number) => {
+    const next = Math.max(-2, Math.min(20, Math.round(v * 10) / 10));
+    setTextLetterSpacing(next);
+    patchActiveFloatingText({ letterSpacing: next });
+  }, [patchActiveFloatingText]);
+  const handleTextList = useCallback((v: TextBoxList) => {
+    setTextList(v);
+    patchActiveFloatingText({ list: v });
+  }, [patchActiveFloatingText]);
+
+  // Reflect the active text box's formatting in the sidebar.
+  useEffect(() => {
+    if (!activeFloatingTextId) return;
+    const ft = floatingTextsRef.current.find(b => b.id === activeFloatingTextId);
+    if (!ft) return;
+    const st = resolveTextBoxStyle(ft);
+    setTextFontFamily(st.fontFamily);
+    setTextFontSize(st.fontSize);
+    setTextColor(st.color);
+    setTextBold(st.bold);
+    setTextItalic(st.italic);
+    setTextUnderline(st.underline);
+    setTextStrikethrough(st.strikethrough);
+    setTextHighlight(st.highlight);
+    setTextAlign(st.align);
+    setTextLineHeight(st.lineHeight);
+    setTextLetterSpacing(st.letterSpacing);
+    setTextList(st.list);
+  }, [activeFloatingTextId]);
 
   // Warn before leaving with unsaved edits
   useEffect(() => {
@@ -2993,6 +3072,11 @@ export default function EditorPage() {
       setTextItalic(false);
       setTextUnderline(false);
       setTextAlign('left');
+      setTextStrikethrough(false);
+      setTextHighlight(null);
+      setTextLineHeight(DEFAULT_TEXT_BOX_STYLE.lineHeight);
+      setTextLetterSpacing(0);
+      setTextList('none');
 
       focusFloatingTextIdRef.current = newBox.id;
       setFloatingTexts(prev => [...prev, newBox]);
@@ -3464,9 +3548,10 @@ export default function EditorPage() {
           if (!ft.text.trim()) continue;
           const rgb = hexToRGB(ft.color);
 
-          newContentBytes = engine.insertTextRun(
+          void rgb;
+          newContentBytes = insertTextBox(
             newContentBytes, page, doc.objects,
-            ft.text, ft.pdfX, ft.pdfY, ft.fontSize, rgb
+            ft.text, resolveTextBoxStyle(ft), ft.pdfX, ft.pdfY + ft.fontSize, ft.pdfWidth,
           );
         }
 
@@ -3682,10 +3767,9 @@ export default function EditorPage() {
 
       for (const ft of texts) {
         if (!ft.text.trim()) continue;
-        const rgb = hexToRGB(ft.color);
-        newContentBytes = engine.insertTextRun(
+        newContentBytes = insertTextBox(
           newContentBytes, page, exportDoc.objects,
-          ft.text, ft.pdfX, ft.pdfY, ft.fontSize, rgb
+          ft.text, resolveTextBoxStyle(ft), ft.pdfX, ft.pdfY + ft.fontSize, ft.pdfWidth,
         );
       }
 
@@ -4164,6 +4248,7 @@ export default function EditorPage() {
 
   const handleFloatingTextPointerDown = useCallback((e: React.PointerEvent, id: string) => {
     e.stopPropagation();
+    if (activeFloatingTextIdRef.current !== id) focusFloatingTextIdRef.current = id;
     setActiveFloatingTextId(id);
     setActiveFloatingImageId(null);
     const box = floatingTexts.find(b => b.id === id);
@@ -6002,6 +6087,17 @@ export default function EditorPage() {
           setTextColor={handleTextColor}
           textAlign={textAlign}
           setTextAlign={handleTextAlign}
+          textStrikethrough={textStrikethrough}
+          setTextStrikethrough={handleTextStrikethrough}
+          textHighlight={textHighlight}
+          setTextHighlight={handleTextHighlight}
+          textLineHeight={textLineHeight}
+          setTextLineHeight={handleTextLineHeight}
+          textLetterSpacing={textLetterSpacing}
+          setTextLetterSpacing={handleTextLetterSpacing}
+          textList={textList}
+          setTextList={handleTextList}
+          formattingTarget={activeFloatingTextId ? 'textbox' : selectedLine ? 'line' : null}
           replacingImageIdRef={replacingImageIdRef}
           fileInputRef={fileInputRef}
           drawColor={drawColor}
@@ -6506,10 +6602,13 @@ export default function EditorPage() {
                 doc?.pages[currentPage]?.mediaBox.y || 0
               );
               const isActive = activeFloatingTextId === ft.id;
+              const st = resolveTextBoxStyle(ft);
+              const layout = layoutTextBox(ft.text, st, ft.pdfWidth);
 
               return (
                 <div
                   key={ft.id}
+                  data-testid="text-box"
                   className={`absolute z-20 cursor-move border-2 ${isActive ? 'border-primary border-dashed' : 'border-transparent hover:border-border-strong hover:border-dashed'} p-1 -m-1`}
                   style={{
                     left: cssX,
@@ -6530,8 +6629,11 @@ export default function EditorPage() {
                       <X size={12} />
                     </button>
                   )}
+                  {isActive ? (
                   <textarea
                     ref={(el) => {
+                      if (el) floatingTextAreaRefs.current.set(ft.id, el);
+                      else floatingTextAreaRefs.current.delete(ft.id);
                       // Focus a just-created box so typing goes into it instead
                       // of triggering tool shortcuts.
                       if (el && focusFloatingTextIdRef.current === ft.id) {
@@ -6541,32 +6643,59 @@ export default function EditorPage() {
                       }
                     }}
                     aria-label="Text box"
+                    data-testid="text-box-input"
                     value={ft.text}
+                    spellCheck={false}
                     onChange={(e) => {
                       setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text: e.target.value } : p));
                     }}
                     onFocus={() => setActiveFloatingTextId(ft.id)}
-                    className="bg-transparent outline-none overflow-hidden block resize"
+                    className="bg-transparent outline-none overflow-hidden block resize p-0 m-0 border-0"
                     style={{
-                      fontFamily: ft.fontFamily,
-                      fontSize: ft.fontSize * scale,
-                      color: ft.color,
+                      fontFamily: textBoxCssFamily(st.fontFamily),
+                      fontSize: st.fontSize * scale,
+                      fontWeight: st.bold ? 700 : 400,
+                      fontStyle: st.italic ? 'italic' : 'normal',
+                      textDecorationLine: [st.underline ? 'underline' : '', st.strikethrough ? 'line-through' : ''].filter(Boolean).join(' ') || 'none',
+                      backgroundColor: st.highlight ?? 'transparent',
+                      textAlign: st.align,
+                      lineHeight: st.lineHeight,
+                      letterSpacing: `${st.letterSpacing * scale}px`,
+                      paddingLeft: layout.indent * scale,
+                      color: st.color,
+                      fontKerning: 'none',
+                      fontVariantLigatures: 'none',
                       minWidth: '100px',
-                      minHeight: `${ft.fontSize * scale * 1.5}px`,
-                      width: ft.pdfWidth ? `${ft.pdfWidth * scale}px` : undefined,
-                      height: ft.pdfHeight ? `${ft.pdfHeight * scale}px` : undefined,
+                      width: ft.pdfWidth ? `${ft.pdfWidth * scale}px` : `${(layout.width + st.fontSize) * scale}px`,
+                      height: ft.pdfHeight ? `${ft.pdfHeight * scale}px` : `${layout.height * scale}px`,
                     }}
                     onPointerDown={e => {
-                      if (isActive) e.stopPropagation();
+                      e.stopPropagation();
                     }}
                     onMouseUp={e => {
                       // Capture size after resize handle is released
                       const target = e.target as HTMLTextAreaElement;
                       const w = target.offsetWidth / scale;
                       const h = target.offsetHeight / scale;
-                      setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p));
+                      const changed = Math.abs(w - (ft.pdfWidth ?? layout.width + st.fontSize)) > 0.5
+                        || Math.abs(h - (ft.pdfHeight ?? layout.height)) > 0.5;
+                      if (changed) setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p));
                     }}
                   />
+                  ) : (
+                    <div
+                      role="button"
+                      tabIndex={0}
+                      aria-label="Text box"
+                      onFocus={() => {
+                        focusFloatingTextIdRef.current = ft.id;
+                        setActiveFloatingTextId(ft.id);
+                      }}
+                      style={{ minWidth: 8, minHeight: st.fontSize * scale }}
+                    >
+                      <TextBoxPreview text={ft.text} style={st} maxWidth={ft.pdfWidth} scale={scale} />
+                    </div>
+                  )}
                 </div>
               );
             })}

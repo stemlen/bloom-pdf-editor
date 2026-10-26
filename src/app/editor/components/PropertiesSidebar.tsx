@@ -2,13 +2,14 @@ import React, { MutableRefObject, useEffect, useState } from 'react';
 import { formatPdfDate, joinParts, plural } from '@/lib/format';
 import {
   Type, TextCursorInput, Image, PenTool, Highlighter, Eraser, MousePointer2,
-  X, Trash2, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, Minus, Plus, Stamp, Link2,
+  X, Trash2, Bold, Italic, Underline, Strikethrough, AlignLeft, AlignCenter, AlignRight, AlignJustify, List, ListOrdered, Minus, Plus, Stamp, Link2,
   PenLine, Star, Copy, Lock, Unlock, RotateCw, KeyRound, ShieldCheck,
   ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles, ScanText, SquareSlash,
 } from 'lucide-react';
 import type { DrawMode, EditorTool, RemovedImageRecord } from '../types';
 import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry, WatermarkPosition } from '@/engine';
 import { confirmDialog } from './ConfirmDialog';
+import { LINE_HEIGHT_PRESETS, TEXT_BOX_FONTS, type TextBoxAlign, type TextBoxList } from '@/engine/editor/text-box';
 
 interface PropertiesSidebarProps {
   onClose?: () => void;
@@ -28,8 +29,23 @@ interface PropertiesSidebarProps {
   setTextUnderline: (v: boolean | ((prev: boolean) => boolean)) => void;
   textColor: string;
   setTextColor: (v: string) => void;
-  textAlign: 'left' | 'center' | 'right';
-  setTextAlign: (v: 'left' | 'center' | 'right') => void;
+  textAlign: TextBoxAlign;
+  setTextAlign: (v: TextBoxAlign) => void;
+  textStrikethrough?: boolean;
+  setTextStrikethrough?: (v: boolean | ((prev: boolean) => boolean)) => void;
+  textHighlight?: string | null;
+  setTextHighlight?: (v: string | null) => void;
+  textLineHeight?: number;
+  setTextLineHeight?: (v: number) => void;
+  textLetterSpacing?: number;
+  setTextLetterSpacing?: (v: number) => void;
+  textList?: TextBoxList;
+  setTextList?: (v: TextBoxList) => void;
+  /**
+   * What the text controls act on: an added text box (every option), an
+   * existing PDF line (font, size, style, colour, left/centre/right), or nothing.
+   */
+  formattingTarget?: 'textbox' | 'line' | null;
 
   replacingImageIdRef: MutableRefObject<string | null>;
   fileInputRef: MutableRefObject<HTMLInputElement | null>;
@@ -189,6 +205,12 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
     textFontFamily, setTextFontFamily, textFontSize, setTextFontSize,
     textBold, setTextBold, textItalic, setTextItalic, textUnderline, setTextUnderline, textColor, setTextColor,
     textAlign, setTextAlign,
+    textStrikethrough = false, setTextStrikethrough,
+    textHighlight = null, setTextHighlight,
+    textLineHeight = 1.2, setTextLineHeight,
+    textLetterSpacing = 0, setTextLetterSpacing,
+    textList = 'none', setTextList,
+    formattingTarget = null,
     replacingImageIdRef, fileInputRef,
     drawColor, setDrawColor, drawSize, setDrawSize,
     drawMode = 'freehand', setDrawMode,
@@ -377,6 +399,19 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               const fontValue = isResourceId
                 ? 'Helvetica'
                 : textFontFamily;
+              if (formattingTarget === 'textbox') {
+                return (
+                  <select
+                    aria-label="Font"
+                    value={TEXT_BOX_FONTS.find(f => f.value === textFontFamily)?.value ?? 'Helvetica'}
+                    onChange={(e) => setTextFontFamily(e.target.value)}
+                    onMouseDown={(e) => e.stopPropagation()}
+                    className="w-full bg-panel-elevated border border-app rounded-lg px-3 py-2 text-xs text-app outline-none focus:border-primary transition-colors cursor-pointer"
+                  >
+                    {TEXT_BOX_FONTS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+                  </select>
+                );
+              }
               const showCurrent = !isResourceId && !FONT_FAMILIES.includes(fontValue);
               return (
                 <select
@@ -445,6 +480,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onMouseDown={(e) => e.preventDefault()}
                 className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${textBold ? 'bg-primary/20 text-primary border border-primary/50' : 'bg-panel-elevated text-app-muted border border-app hover:text-app hover:bg-panel-elevated/80'}`}
                 title="Bold"
+                aria-label="Bold"
+                aria-pressed={textBold}
               >
                 <Bold size={16} />
               </button>
@@ -453,6 +490,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onMouseDown={(e) => e.preventDefault()}
                 className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${textItalic ? 'bg-primary/20 text-primary border border-primary/50' : 'bg-panel-elevated text-app-muted border border-app hover:text-app hover:bg-panel-elevated/80'}`}
                 title="Italic"
+                aria-label="Italic"
+                aria-pressed={textItalic}
               >
                 <Italic size={16} />
               </button>
@@ -461,8 +500,22 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onMouseDown={(e) => e.preventDefault()}
                 className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all ${textUnderline ? 'bg-primary/20 text-primary border border-primary/50' : 'bg-panel-elevated text-app-muted border border-app hover:text-app hover:bg-panel-elevated/80'}`}
                 title="Underline"
+                aria-label="Underline"
+                aria-pressed={textUnderline}
               >
                 <Underline size={16} />
+              </button>
+              <button
+                type="button"
+                onClick={() => setTextStrikethrough?.(v => !v)}
+                onMouseDown={(e) => e.preventDefault()}
+                disabled={formattingTarget !== 'textbox'}
+                aria-pressed={textStrikethrough}
+                aria-label="Strikethrough"
+                className={`flex-1 py-2 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-all disabled:opacity-40 disabled:cursor-not-allowed ${textStrikethrough ? 'bg-primary/20 text-primary border border-primary/50' : 'bg-panel-elevated text-app-muted border border-app hover:text-app hover:bg-panel-elevated/80'}`}
+                title={formattingTarget === 'textbox' ? 'Strikethrough' : 'Strikethrough is available for text boxes you add'}
+              >
+                <Strikethrough size={16} />
               </button>
             </div>
           </div>
@@ -514,21 +567,132 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 { val: 'left' as const, icon: <AlignLeft size={14} /> },
                 { val: 'center' as const, icon: <AlignCenter size={14} /> },
                 { val: 'right' as const, icon: <AlignRight size={14} /> },
+                { val: 'justify' as const, icon: <AlignJustify size={14} /> },
               ]).map(a => (
                 <button
                   key={a.val}
                   type="button"
-                  aria-label={`Align ${a.val}`}
+                  aria-label={a.val === 'justify' ? 'Justify' : `Align ${a.val}`}
+                  title={a.val === 'justify' && formattingTarget !== 'textbox' ? 'Justify is available for text boxes you add' : a.val === 'justify' ? 'Justify' : `Align ${a.val}`}
                   aria-pressed={textAlign === a.val}
+                  disabled={a.val === 'justify' && formattingTarget !== 'textbox'}
                   onClick={() => setTextAlign(a.val)}
                   onMouseDown={(e) => e.preventDefault()}
-                  className={`flex-1 py-1.5 rounded-md flex items-center justify-center transition-all ${textAlign === a.val ? 'bg-primary text-white shadow-sm' : 'text-app-muted hover:text-app'}`}
+                  className={`flex-1 py-1.5 rounded-md flex items-center justify-center transition-all disabled:opacity-40 disabled:cursor-not-allowed ${textAlign === a.val ? 'bg-primary text-white shadow-sm' : 'text-app-muted hover:text-app'}`}
                 >
                   {a.icon}
                 </button>
               ))}
             </div>
           </div>
+
+          {formattingTarget === 'textbox' ? (
+            <>
+              {/* Highlight */}
+              <div className="space-y-1.5">
+                <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Highlight</label>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    aria-label="No highlight"
+                    title="No highlight"
+                    aria-pressed={textHighlight == null}
+                    onClick={() => setTextHighlight?.(null)}
+                    onMouseDown={(e) => e.preventDefault()}
+                    className={`w-5 h-5 rounded-full border-2 bg-panel-elevated relative overflow-hidden transition-transform ${textHighlight == null ? 'scale-125 border-bloom-300' : 'border-app hover:scale-110'}`}
+                  >
+                    <span className="absolute inset-0 m-auto block h-[2px] w-[140%] -translate-x-[15%] rotate-45 bg-red-500" />
+                  </button>
+                  {['#fff176', '#a5f3a1', '#93c5fd', '#f9a8d4', '#fdba74'].map(c => (
+                    <button
+                      key={c}
+                      type="button"
+                      title={`Highlight ${c.toUpperCase()}`}
+                      aria-label={`Highlight ${c.toUpperCase()}`}
+                      aria-pressed={textHighlight?.toLowerCase() === c}
+                      onClick={() => setTextHighlight?.(c)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      className={`w-5 h-5 rounded-full border-2 transition-transform ${textHighlight?.toLowerCase() === c ? 'scale-125 border-bloom-300' : 'border-app hover:scale-110'}`}
+                      style={{ backgroundColor: c }}
+                    />
+                  ))}
+                  <input
+                    type="color"
+                    aria-label="Custom highlight colour"
+                    title="Custom highlight colour"
+                    value={textHighlight ?? '#fff176'}
+                    onChange={(e) => setTextHighlight?.(e.target.value)}
+                    className="w-6 h-6 rounded-md border border-app cursor-pointer bg-transparent"
+                  />
+                </div>
+              </div>
+
+              {/* Spacing */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <label htmlFor="text-line-height" className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Line spacing</label>
+                  <select
+                    id="text-line-height"
+                    value={String(textLineHeight)}
+                    onChange={(e) => setTextLineHeight?.(parseFloat(e.target.value))}
+                    className="w-full bg-panel-elevated border border-app rounded-lg px-2 py-1.5 text-xs text-app outline-none focus:border-primary cursor-pointer"
+                  >
+                    {!LINE_HEIGHT_PRESETS.includes(textLineHeight) && (
+                      <option value={String(textLineHeight)}>{textLineHeight.toFixed(2)}</option>
+                    )}
+                    {LINE_HEIGHT_PRESETS.map(v => (
+                      <option key={v} value={String(v)}>{v.toFixed(2)}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="space-y-1.5">
+                  <label htmlFor="text-letter-spacing" className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Letter spacing</label>
+                  <div className="flex items-center gap-1">
+                    <input
+                      id="text-letter-spacing"
+                      type="number"
+                      step={0.1}
+                      min={-2}
+                      max={20}
+                      value={textLetterSpacing}
+                      onChange={(e) => setTextLetterSpacing?.(parseFloat(e.target.value) || 0)}
+                      className="w-full bg-panel-elevated border border-app rounded-lg px-2 py-1.5 text-xs text-app text-center outline-none focus:border-primary"
+                    />
+                    <span className="text-[10.5px] text-app-muted">pt</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Lists */}
+              <div className="space-y-1.5">
+                <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">List</label>
+                <div className="flex gap-1 bg-panel-elevated p-1 rounded-lg border border-app">
+                  {([
+                    { val: 'none' as const, label: 'No list', icon: <span className="text-[11px] font-medium">None</span> },
+                    { val: 'bullet' as const, label: 'Bulleted list', icon: <List size={14} /> },
+                    { val: 'numbered' as const, label: 'Numbered list', icon: <ListOrdered size={14} /> },
+                  ]).map(o => (
+                    <button
+                      key={o.val}
+                      type="button"
+                      aria-label={o.label}
+                      title={o.label}
+                      aria-pressed={textList === o.val}
+                      onClick={() => setTextList?.(o.val)}
+                      onMouseDown={(e) => e.preventDefault()}
+                      className={`flex-1 py-1.5 rounded-md flex items-center justify-center transition-all ${textList === o.val ? 'bg-primary text-white shadow-sm' : 'text-app-muted hover:text-app'}`}
+                    >
+                      {o.icon}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </>
+          ) : formattingTarget === 'line' ? (
+            <p className="text-[11px] leading-snug text-app-muted">
+              Highlight, spacing, lists, strikethrough and justify are available for text boxes you add with Add Text.
+            </p>
+          ) : null}
 
           {/* Links — scan highlights on the PDF; edit/open via page hover popover */}
           <div className="space-y-1.5">
