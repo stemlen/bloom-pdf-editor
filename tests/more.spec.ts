@@ -112,7 +112,7 @@ test.describe("text & tables", () => {
     await page.keyboard.press("ControlOrMeta+a");
     const panel = page.getByTestId("options-panel");
     await panel.locator("select").first().selectOption("Times New Roman");
-    await panel.getByRole("button", { name: "Text colour #3b82f6" }).click();
+    await panel.getByRole("button", { name: "Text color #3B82F6" }).click();
     await panel.getByRole("button", { name: "Align center" }).click();
     await expect(panel.getByRole("button", { name: "Align center" })).toHaveAttribute("aria-pressed", "true");
     await page.getByLabel("Edit line").focus();
@@ -248,7 +248,7 @@ test.describe("watermark & security extras", () => {
     const panel = page.getByTestId("security-panel");
     await panel.getByRole("button", { name: "Protect", exact: true }).click();
     await panel.getByPlaceholder("Optional open password").fill("tulip42");
-    await panel.getByPlaceholder("Required for permissions").fill("owner42");
+    await panel.getByPlaceholder("Leave blank to generate a strong one").first().fill("owner42");
     await panel.getByRole("button", { name: "Encrypt PDF" }).click();
     await expect(panel.getByText("Document encrypted")).toBeVisible();
     await panel.getByRole("button", { name: "Remove encryption" }).click();

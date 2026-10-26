@@ -56,6 +56,7 @@ test("rotate, insert blank, delete and insert another PDF — all saved in the d
   // Delete the first page.
   await thumbs.nth(0).hover();
   await thumbs.nth(0).getByRole("button", { name: "Delete page" }).click();
+  await page.getByTestId("confirm-dialog").getByRole("button", { name: "Delete page" }).click();
   await expect(thumbs).toHaveCount(3);
 
   // Insert the form PDF at the very start.

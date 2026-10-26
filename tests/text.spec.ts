@@ -50,7 +50,7 @@ test("undo and redo step one edit at a time", async ({ page }) => {
   await page.locator("body").click({ position: { x: 5, y: 5 } }).catch(() => {});
   await page.keyboard.press("ControlOrMeta+z");
   await page.getByRole("button", { name: "Toggle Find & Replace" }).click();
-  const find = page.getByPlaceholder("Search text in PDF...");
+  const find = page.getByPlaceholder("Search text in PDF…");
   await find.fill("one@bloompdf");
   await expect(page.getByTestId("match-count")).toHaveText("1/1");
   await page.getByTitle("Close Search").click();
