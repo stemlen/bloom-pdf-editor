@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createContainer, type BloomContainer } from '../container.js';
+import type { ConvertTarget } from '../jobs/types.js';
 
 // Five pages: chapter headings, a section heading, body text and, on pages 2
 // and 4, a ruled 4×8 table whose rows are each set as one text line.
@@ -24,7 +25,7 @@ afterEach(async () => {
   await container.stop();
 });
 
-async function convert(target: string): Promise<string> {
+async function convert(target: ConvertTarget): Promise<string> {
   const queued = await container.documentEngine.enqueueConversion(
     { filename: 'b-mixed-5pages.pdf', target, options: {} },
     fixture,
