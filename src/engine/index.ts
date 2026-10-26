@@ -85,6 +85,9 @@ export {
   isLegacyIndicFont,
   convertKrutiDevToUnicode,
   INDIC_FONT_FALLBACKS,
+  EMOJI_FONT_FALLBACKS,
+  hasEmoji,
+  countEmoji,
 } from './fonts/indic-normalizer';
 
 // ── Renderer ──
@@ -256,11 +259,14 @@ export {
   addAnnotationToPage,
   removeAnnotationFromPage,
   eraseAnnotationsAtPoint,
+  findMarkupAnnotationsAtPoint,
+  hitTestMarkupAnnotation,
   clearMarkupAnnotationsOnPage,
   pdfDateString,
 } from './editor/annotation-engine';
 export type {
   AnnotationBase,
+  MarkupAnnotationHit,
   HighlightAnnotation,
   FreeTextAnnotation,
   InkAnnotation,

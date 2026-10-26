@@ -13,7 +13,11 @@ export class JsonExporter {
     const payload = {
       id: udm.id,
       version: udm.version,
-      metadata: udm.metadata,
+      // Leave out empty metadata rather than writing "" or [].
+      metadata: Object.fromEntries(
+        Object.entries(udm.metadata).filter(([, v]) =>
+          v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && v.length === 0)),
+      ),
       content: blocks.map((b) => {
         if (b.kind === 'table') {
           return {

@@ -249,16 +249,16 @@ npm run test:e2e                  # serves out/ on :4174 and runs tests/*.spec.t
 
 The end-to-end suite covers every editor feature — text editing, pages, annotations, images, forms, watermarks, signatures (visual and cryptographic), security, find & replace, OCR, exports and all 12 document conversions — plus light / dark / mobile smoke tests that fail on console errors or horizontal overflow. OCR needs network access to the jsDelivr CDN.
 
-### Deploy (Cloudflare Pages)
+### Deploy (Cloudflare Workers)
 
-`npm run build` produces a static site in `out/` (Next.js `output: 'export'`). Deploy it like bloompdf.app:
+`npm run build` produces a static site in `out/` (Next.js `output: 'export'`). `wrangler.json` serves that folder as Workers static assets, so no Worker script is needed:
 
 ```bash
-npm run pages:deploy          # build + wrangler pages deploy out
-npm run pages:preview         # build + serve out/ locally through wrangler
+npm run deploy                # build + wrangler deploy
+npm run preview               # build + serve out/ locally through wrangler dev
 ```
 
-For Git-connected Pages builds use build command `npm run build` and output directory `out`. `public/_headers` sets the security headers and long-lived caching for `/_next/static/*`.
+For Git-connected Workers Builds use build command `npm run build` and deploy command `npx wrangler deploy`. `public/_headers` (copied to `out/_headers`) sets the security headers and long-lived caching for `/_next/static/*`.
 
 ### Docker (Optional, standalone engine server)
 

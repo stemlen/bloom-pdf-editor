@@ -42,6 +42,7 @@ interface GraphicsState {
   fontSize: number;
   charSpacing: number;
   wordSpacing: number;
+  leading: number;
   textMatrix: Matrix2D;
   textLineMatrix: Matrix2D;
   renderingMode: number;
@@ -62,6 +63,7 @@ function defaultState(): GraphicsState {
     fontSize: 12,
     charSpacing: 0,
     wordSpacing: 0,
+    leading: 0,
     textMatrix: IDENTITY_MATRIX,
     textLineMatrix: IDENTITY_MATRIX,
     renderingMode: 0,
@@ -131,6 +133,11 @@ export async function extractPageRaw(
     graph.add(vector);
     spatial.insert({ id, type: 'vector', bbox, zIndex: vector.zIndex });
     path.length = 0;
+  };
+
+  const nextLine = () => {
+    gs.textLineMatrix = multiplyMatrix(gs.textLineMatrix, [1, 0, 0, 1, 0, -gs.leading]);
+    gs.textMatrix = gs.textLineMatrix;
   };
 
   const showText = (text: string) => {
@@ -384,6 +391,7 @@ export async function extractPageRaw(
       }
       case 'TD': {
         const [tx, ty] = nums(operands, 2);
+        gs.leading = -ty;
         gs.textLineMatrix = multiplyMatrix(gs.textLineMatrix, [1, 0, 0, 1, tx, ty]);
         gs.textMatrix = gs.textLineMatrix;
         break;
@@ -411,17 +419,27 @@ export async function extractPageRaw(
       case 'Tw':
         gs.wordSpacing = num(operands, 0);
         break;
+      case 'TL':
+        gs.leading = num(operands, 0);
+        break;
+      case 'T*':
+        nextLine();
+        break;
       case 'Tr':
         gs.renderingMode = num(operands, 0);
         break;
       case 'Tj':
-      case "'": {
+      case "'":
+      case '"': {
+        if (op === '"') {
+          const [aw, ac] = nums(operands, 2);
+          gs.wordSpacing = aw;
+          gs.charSpacing = ac;
+        }
+        // ' and " move to the next line before showing the string.
+        if (op !== 'Tj') nextLine();
         const s = operands.find((o) => typeof o === 'string') as string | undefined;
         if (s) showText(s);
-        if (op === "'") {
-          gs.textLineMatrix = multiplyMatrix(gs.textLineMatrix, [1, 0, 0, 1, 0, -gs.fontSize]);
-          gs.textMatrix = gs.textLineMatrix;
-        }
         break;
       }
       case 'TJ': {

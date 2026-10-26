@@ -1,6 +1,6 @@
 import React from 'react';
 import type { EditorTool } from '../types';
-import { TOOLS } from '../types';
+import { TOOL_LABELS } from '../types';
 import type { TextRun, RenderResult, PDFDocumentData } from '@/engine';
 
 interface StatusBarProps {
@@ -9,6 +9,10 @@ interface StatusBarProps {
   selectedRun: TextRun | null;
   doc: PDFDocumentData | null;
   totalPages: number;
+}
+
+function plural(count: number, one: string, many: string): string {
+  return `${count} ${count === 1 ? one : many}`;
 }
 
 export function StatusBar({
@@ -26,7 +30,7 @@ export function StatusBar({
           : ''}
       </span>
       <span className="text-[10px] font-medium tracking-wider text-app-faint flex items-center gap-2">
-        <span>TOOL: <span className="text-app">{TOOLS.find(t => t.id === activeTool)?.label.toUpperCase()}</span></span>
+        <span>TOOL: <span className="text-app">{TOOL_LABELS[activeTool].toUpperCase()}</span></span>
         {selectedRun && (
           <>
             <span className="w-1 h-1 rounded-full bg-[var(--border-strong)]" />
@@ -35,8 +39,11 @@ export function StatusBar({
         )}
       </span>
       <span className="text-[10px] font-medium tracking-wider text-app-faint">
-        {renderResult ? `${renderResult.textLines.length} LINES` : ''}
-        {doc ? ` • ${totalPages} PAGES • v${doc.version}` : ''}
+        {[
+          renderResult ? plural(renderResult.textLines.length, 'LINE ON THIS PAGE', 'LINES ON THIS PAGE') : null,
+          doc ? plural(totalPages, 'PAGE', 'PAGES') : null,
+          doc ? `PDF ${doc.version}` : null,
+        ].filter(Boolean).join(' • ')}
       </span>
     </footer>
   );

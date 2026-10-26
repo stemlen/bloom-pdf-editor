@@ -151,8 +151,34 @@ function reconstructPage(input: {
   const footers: Page['footers'] = [];
   const bodyBlocks: Block[] = [];
 
+  // A body text region often holds several separate layout blocks (headings,
+  // paragraphs, table rows). One IDM block per layout block keeps each one's
+  // position and style, so exporters can tell headings and table rows apart
+  // instead of seeing one page-sized block (BE-507, BE-509).
+  const expanded = regions.flatMap((region): LayoutRegion[] => {
+    if (region.kind !== 'text_block' || region.blocks.some((b) => b.kind === 'image')) {
+      return [region];
+    }
+    const textBlocks = region.blocks.filter(
+      (b) =>
+        b.kind === 'text_cluster' ||
+        b.kind === 'line' ||
+        b.kind === 'word' ||
+        (b.text != null && b.text.length > 0),
+    );
+    if (textBlocks.length < 2) return [region];
+    return textBlocks.map((b) => ({
+      ...region,
+      id: `${region.id}_${b.id}`,
+      bbox: b.bbox,
+      blocks: [b],
+      averageFont: b.style?.fontName ?? region.averageFont,
+      averageFontSize: b.style?.fontSize ?? region.averageFontSize,
+    }));
+  });
+
   let logical = 0;
-  for (const region of regions) {
+  for (const region of expanded) {
     const block = regionToBlock({
       region,
       rawPage,

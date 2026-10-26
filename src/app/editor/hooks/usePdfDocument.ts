@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { loadPdfFromStorage } from '@/lib/pdfStorage';
 import type { PDFDocumentData, PdfPermissions } from '@/engine';
+import { friendlyPdfError } from '@/lib/pdfErrors';
 
 export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof import('@/engine')) => void) {
   const router = useRouter();
@@ -26,8 +27,10 @@ export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof 
     let cancelled = false;
 
     async function init() {
+      let openedBytes: Uint8Array | undefined;
       try {
         const stored = await loadPdfFromStorage();
+        if (stored) openedBytes = new Uint8Array(stored.bytes);
         if (!stored) { router.push('/'); return; }
         if (cancelled) return;
         setFileName(stored.fileName);
@@ -62,7 +65,7 @@ export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof 
       } catch (e) {
         if (cancelled) return;
         console.error('[Editor] Init failed:', e);
-        setError(`Failed to parse PDF: ${e instanceof Error ? e.message : String(e)}`);
+        setError(friendlyPdfError(e, openedBytes));
         setIsLoading(false);
       }
     }

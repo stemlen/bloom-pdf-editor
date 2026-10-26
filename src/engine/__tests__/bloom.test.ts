@@ -102,7 +102,7 @@ describe('bloom edit + layout', () => {
 
   it('insert at caret grows text once', () => {
     const runs = [makeRun('ABC', { x: 50, y: 700, indices: [0] })];
-    let page = ingestPage(runs, { pageIndex: 0, width: 612, height: 792 });
+    const page = ingestPage(runs, { pageIndex: 0, width: 612, height: 792 });
     const blockId = page.blocks[0].id;
     const result = insertTextAtCaret(page, { blockId, offset: 1 }, 'X');
     expect(blockPlainText(result.page.blocks[0])).toBe('AXBC');

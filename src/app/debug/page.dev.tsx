@@ -33,8 +33,10 @@ export default function DebugPage() {
       const pdfBytes = new Uint8Array(buffer);
       const parsed = await engineRef.current.parsePDF(pdfBytes);
       setSummary(
-        `Parsed ${file.name}: ${parsed.pages.length} page(s), PDF ${parsed.version}. ` +
-          `Document conversion runs in the Export panel.`,
+        [
+          `Parsed ${file.name}: ${parsed.pages.length} ${parsed.pages.length === 1 ? 'page' : 'pages'}, PDF ${parsed.version}.`,
+          'Document conversion runs in the Export panel.',
+        ].join(' '),
       );
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : String(err));
@@ -58,7 +60,7 @@ export default function DebugPage() {
         className="block w-full text-sm text-muted-foreground file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-primary/10 file:text-primary hover:file:bg-primary/15 mb-8"
       />
 
-      {loading && <div className="text-primary animate-pulse">Processing PDF...</div>}
+      {loading && <div className="text-primary animate-pulse">Processing PDF…</div>}
       {error && <div className="text-destructive font-medium">Error: {error}</div>}
       {summary && <div className="text-emerald-700 dark:text-emerald-400 font-medium">{summary}</div>}
     </div>

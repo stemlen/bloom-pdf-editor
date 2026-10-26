@@ -84,14 +84,19 @@ export function computeFileKeyR2R4(
   fileId: FileIdPair,
 ): Uint8Array {
   const keyLen = keyByteLength(enc);
-  let hash = md5(padPassword(password));
 
-  // Build input for next MD5: hash || O || P || ID[0] [|| FFFFFFFF]
-  const parts: Uint8Array[] = [hash, enc.O, int32LE(enc.P), fileId.permanent];
+  // A single MD5 over: padded password || O (32 bytes) || P (int32 LE) || ID[0]
+  // [|| FFFFFFFF when R4 and metadata is not encrypted].
+  const parts: Uint8Array[] = [
+    padPassword(password),
+    enc.O.subarray(0, 32),
+    int32LE(enc.P),
+    fileId.permanent,
+  ];
   if (enc.revision >= 4 && !enc.encryptMetadata) {
     parts.push(new Uint8Array([0xff, 0xff, 0xff, 0xff]));
   }
-  hash = md5(concatBytes(...parts));
+  let hash = md5(concatBytes(...parts));
 
   if (enc.revision >= 3) {
     for (let i = 0; i < 50; i++) {
@@ -116,7 +121,7 @@ export function computeOValue(
     for (let i = 0; i < 50; i++) hash = md5(hash);
   }
   const ownerKey = hash.subarray(0, keyLen);
-  let userPad = padPassword(userPassword);
+  const userPad = padPassword(userPassword);
 
   if (revision === 2) {
     return rc4(ownerKey, userPad);
@@ -145,7 +150,7 @@ export function computeUValue(
   }
 
   // R3+: MD5(padding || ID) then RC4 with 20 iterations
-  let hash = md5(concatBytes(PASSWORD_PADDING, fileId.permanent));
+  const hash = md5(concatBytes(PASSWORD_PADDING, fileId.permanent));
   let data = hash; // 16 bytes
   for (let i = 0; i < 20; i++) {
     const iterKey = new Uint8Array(fileKey.length);

@@ -32,12 +32,12 @@ test.describe("render export", () => {
   test("SVG and plain text", async ({ page }) => {
     await openInEditor(page);
     const panel = await openExport(page);
-    await panel.getByRole("button", { name: /^SVG Vector/ }).click();
+    await panel.getByRole("button", { name: /^SVG \(page image\)/ }).click();
     await panel.getByRole("button", { name: "Page 1", exact: true }).click();
     let dl = await download(page, panel.getByTestId("export-submit"));
     expect(text(dl.bytes)).toContain("<svg");
 
-    await panel.getByRole("button", { name: /^Plain Text/ }).click();
+    await panel.getByRole("button", { name: /^Plain text Text line/ }).click();
     await panel.getByRole("button", { name: "All Pages" }).click();
     dl = await download(page, panel.getByTestId("export-submit"));
     expect(dl.name).toBe("sample.txt");
@@ -58,7 +58,7 @@ const CONVERSIONS: { label: RegExp; ext: string; check: (b: Uint8Array) => Promi
   { label: /^HTML/, ext: "html", check: (b) => expect(text(b)).toContain("Quarterly Garden Report") },
   { label: /Markdown/, ext: "md", check: (b) => expect(text(b)).toContain("Quarterly Garden Report") },
   { label: /EPUB/, ext: "epub", check: async (b) => expect(await zipText(b, "mimetype")).toBe("application/epub+zip") },
-  { label: /Plain text/, ext: "txt", check: (b) => expect(text(b)).toContain("Sales by Region") },
+  { label: /Plain text \(paragraphs\)/, ext: "txt", check: (b) => expect(text(b)).toContain("Sales by Region") },
   { label: /JSON/, ext: "json", check: (b) => expect(() => JSON.parse(text(b))).not.toThrow() },
   { label: /XML/, ext: "xml", check: (b) => expect(text(b)).toContain("<?xml") },
   { label: /SVG \(structure\)/, ext: "svg", check: (b) => expect(text(b)).toContain("<svg") },

@@ -50,7 +50,7 @@ test("undo and redo step one edit at a time", async ({ page }) => {
   await page.locator("body").click({ position: { x: 5, y: 5 } }).catch(() => {});
   await page.keyboard.press("ControlOrMeta+z");
   await page.getByRole("button", { name: "Toggle Find & Replace" }).click();
-  const find = page.getByPlaceholder("Search text in PDF...");
+  const find = page.getByPlaceholder("Search text in PDF…");
   await find.fill("one@bloompdf");
   await expect(page.getByTestId("match-count")).toHaveText("1/1");
   await page.getByTitle("Close Search").click();
@@ -108,18 +108,18 @@ test("links: add a link to a line, then scan and find it", async ({ page }) => {
   await openInEditor(page);
   const messages: string[] = [];
   page.on("dialog", (d) => messages.push(d.message()));
-  await page.getByRole("button", { name: "Scan for links" }).click();
+  await page.getByRole("button", { name: "Scan for Links" }).click();
   await expect.poll(() => messages).toContain("No links found on this page.");
 
   const at = await pdfPoint(page, CONTACT.x, CONTACT.y);
   await page.mouse.click(at.x, at.y);
   await page.keyboard.press("ControlOrMeta+a");
-  await page.getByRole("button", { name: "Add link to selection" }).click();
+  await page.getByRole("button", { name: "Add Link to Selection" }).click();
   const url = page.getByPlaceholder("https://example.com");
   await url.fill("https://bloompdf.app/contact");
   await page.getByRole("button", { name: "Save" }).click();
-  await page.getByRole("button", { name: /Scan for links|Links highlighted/ }).click();
-  await expect(page.getByRole("button", { name: "Links highlighted" })).toBeVisible();
+  await page.getByRole("button", { name: /Scan for Links|Links? Highlighted|No Links on This Page/ }).click();
+  await expect(page.getByRole("button", { name: /Links? Highlighted/ })).toBeVisible();
 
   const { bytes } = await downloadPdf(page);
   expect(await annotCount(bytes, "Link")).toBe(1);

@@ -1,12 +1,14 @@
-import React, { MutableRefObject, useState } from 'react';
+import React, { MutableRefObject, useEffect, useState } from 'react';
+import { formatPdfDate, joinParts, plural } from '@/lib/format';
 import {
   Type, TextCursorInput, Image, PenTool, Highlighter, Eraser, MousePointer2,
   X, Trash2, Bold, Italic, Underline, AlignLeft, AlignCenter, AlignRight, Minus, Plus, Stamp, Link2,
   PenLine, Star, Copy, Lock, Unlock, RotateCw, KeyRound, ShieldCheck,
-  ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles,
+  ArrowRight, Square, Circle, PanelLeftClose, RotateCcw, Download, History, ChevronDown, ChevronRight, Archive, Sparkles, ScanText, SquareSlash,
 } from 'lucide-react';
 import type { DrawMode, EditorTool, RemovedImageRecord } from '../types';
-import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry } from '@/engine';
+import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry, WatermarkPosition } from '@/engine';
+import { confirmDialog } from './ConfirmDialog';
 
 interface PropertiesSidebarProps {
   onClose?: () => void;
@@ -81,6 +83,11 @@ interface PropertiesSidebarProps {
   onFlattenForms?: () => void;
   /** Duplicate the selected/editing text line one row below (table-like). */
   onDuplicateLineBelow?: () => void;
+  /** Run OCR on the current page and insert the recognized text. */
+  onRecognizeText?: () => void;
+  /** Redaction marks waiting to be applied on this page. */
+  redactionMarkCount?: number;
+  onApplyRedactions?: () => void;
   /** Active cell inside an auto-detected PDF table. */
   tableInfo?: { rows: number; cols: number; row: number; col: number } | null;
   onAddTableRow?: () => void;
@@ -96,8 +103,8 @@ interface PropertiesSidebarProps {
   setWatermarkRotation?: (v: number) => void;
   watermarkSize?: number;
   setWatermarkSize?: (v: number) => void;
-  watermarkPosition?: string;
-  setWatermarkPosition?: (v: string) => void;
+  watermarkPosition?: WatermarkPosition;
+  setWatermarkPosition?: (v: WatermarkPosition) => void;
   watermarkMosaic?: boolean;
   setWatermarkMosaic?: (v: boolean) => void;
   watermarkPageFrom?: number;
@@ -167,6 +174,14 @@ interface PropertiesSidebarProps {
   isMobile?: boolean;
 }
 
+/** Plain names for PDF form field types (/FT). */
+const FIELD_TYPE_LABELS: Record<string, string> = {
+  Tx: 'Text field',
+  Btn: 'Checkbox, radio or button',
+  Ch: 'Dropdown or list',
+  Sig: 'Signature field',
+};
+
 export function PropertiesSidebar(props: PropertiesSidebarProps) {
   const {
     onClose,
@@ -187,6 +202,9 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
     formFields = [], selectedFormField, formFieldDraft = '',
     onFormFieldSelect, onFormFieldChange, onFlattenForms,
     onDuplicateLineBelow,
+  onRecognizeText,
+  redactionMarkCount = 0,
+  onApplyRedactions,
     tableInfo = null,
     onAddTableRow,
     onAddTableColumn,
@@ -239,7 +257,15 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
   const [previewImage, setPreviewImage] = useState<RemovedImageRecord | null>(null);
   const [isRemovedImagesOpen, setIsRemovedImagesOpen] = useState(true);
 
-  if (!['text', 'addtext', 'draw', 'highlight', 'erase', 'select', 'watermark', 'sign'].includes(activeTool)) return null;
+  // Clock for relative timestamps ("5m ago"); ticks once a minute so the
+  // render itself stays pure.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  if (!['text', 'addtext', 'draw', 'highlight', 'erase', 'select', 'watermark', 'sign', 'redact'].includes(activeTool)) return null;
 
   const FONT_FAMILIES = [
     'Helvetica',
@@ -276,9 +302,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
 
   const isMobile = props.isMobile ?? false;
 
-
   const formatRelativeTime = (timestamp: number): string => {
-    const diff = Date.now() - timestamp;
+    const diff = Math.max(0, now - timestamp);
     if (diff < 60_000) return 'Just now';
     const mins = Math.floor(diff / 60_000);
     if (mins < 60) return `${mins}m ago`;
@@ -318,7 +343,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
         {/* Top Bar with Hide Panel Button */}
         {onClose && (
           <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-border text-xs text-muted-foreground">
-            <span className="font-hand text-[19px] leading-none text-primary normal-case">options</span>
+            <span className="font-hand text-[19px] leading-none text-primary normal-case">Options</span>
           <button
             onClick={onClose}
             title="Hide panel"
@@ -469,7 +494,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 <button
                   key={c}
                   type="button"
-                  aria-label={`Text colour ${c}`}
+                  title={`Text color ${c.toUpperCase()}`}
+                  aria-label={`Text color ${c.toUpperCase()}`}
                   aria-pressed={textColor.toLowerCase() === c}
                   onClick={() => setTextColor(c)}
                   onMouseDown={(e) => e.preventDefault()}
@@ -522,7 +548,11 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 }`}
               >
                 <Link2 size={14} />
-                {linksHighlighted ? 'Links highlighted' : 'Scan for links'}
+                {!linksHighlighted
+                  ? 'Scan for Links'
+                  : pageLinkCount === 0
+                    ? 'No Links on This Page'
+                    : `${pageLinkCount} ${pageLinkCount === 1 ? 'Link' : 'Links'} Highlighted`}
               </button>
             )}
 
@@ -566,13 +596,13 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                     className="w-full flex items-center justify-center gap-2 py-2 rounded-lg bg-primary/15 text-primary border border-primary/30 hover:bg-bloom-600/25 text-xs font-semibold transition-colors"
                   >
                     <Link2 size={14} />
-                    Add link to selection
+                    Add Link to Selection
                   </button>
                 )}
                 <p className="text-[10px] text-app-faint leading-relaxed">
                   {linksHighlighted
                     ? 'Hover a highlighted link on the page to edit or open it.'
-                    : 'Click Scan for links to highlight them on the PDF. Select text to add a new one.'}
+                    : 'Click Scan for Links to highlight them on the PDF. Select text to add a new one.'}
                 </p>
               </>
             )}
@@ -590,6 +620,17 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               <TextCursorInput size={14} />
               Add Text Box
             </button>
+            {onRecognizeText && (
+              <button
+                type="button"
+                onClick={onRecognizeText}
+                className="w-full flex items-center justify-center gap-2 py-2 bg-panel-elevated hover:bg-panel-elevated/80 text-app rounded-md transition-colors text-xs font-semibold border border-app"
+                title="Recognize text on this page with OCR, for scanned pages"
+              >
+                <ScanText size={14} />
+                Recognize Text (OCR)
+              </button>
+            )}
             {onDuplicateLineBelow && selectedRun && (
               <button
                 onClick={onDuplicateLineBelow}
@@ -644,6 +685,35 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               Add Image
             </button>
           </div>
+        </div>
+      )}
+
+      {/* REDACT TOOL PROPERTIES */}
+      {activeTool === 'redact' && (
+        <div className="p-4 space-y-4 animate-in fade-in slide-in-from-left-4 duration-300" data-testid="redact-panel">
+          <div className="flex items-center gap-2 text-[11px] font-bold tracking-wider text-foreground uppercase">
+            <SquareSlash size={14} />
+            Redact Properties
+          </div>
+          <p className="text-[11px] text-app-muted leading-relaxed">
+            Click a line of text to mark it for redaction. Marked text is removed from the PDF, not just covered, when you apply the redactions.
+          </p>
+          <div className="text-[11px] font-medium text-app">
+            {redactionMarkCount === 0
+              ? 'No lines marked on this page'
+              : `${redactionMarkCount} ${redactionMarkCount === 1 ? 'line' : 'lines'} marked on this page`}
+          </div>
+          {onApplyRedactions && (
+            <button
+              type="button"
+              onClick={onApplyRedactions}
+              disabled={redactionMarkCount === 0}
+              className="w-full flex items-center justify-center gap-2 py-2 rounded-md bg-red-600 text-white hover:bg-red-700 disabled:opacity-40 disabled:pointer-events-none text-xs font-semibold transition-colors"
+            >
+              <SquareSlash size={14} />
+              Apply Redactions
+            </button>
+          )}
         </div>
       )}
 
@@ -707,8 +777,12 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               {['#ef4444', '#3b82f6', '#22c55e', '#f59e0b', '#a855f7', '#ec4899', '#14b8a6', '#f4f4f5'].map(color => (
                 <button
                   key={color}
+                  type="button"
+                  title={`Draw color ${color.toUpperCase()}`}
+                  aria-label={`Draw color ${color.toUpperCase()}`}
+                  aria-pressed={drawColor.toLowerCase() === color.toLowerCase()}
                   onClick={() => setDrawColor(color)}
-                  className={`w-6 h-6 rounded-full mx-auto transition-transform ${drawColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-bloom-500 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
+                  className={`w-6 h-6 rounded-full mx-auto border border-black/15 dark:border-white/20 transition-transform ${drawColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-bloom-500 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
                   style={{ backgroundColor: color }}
                 />
               ))}
@@ -769,8 +843,12 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               {['#fffb00', '#00ff00', '#00e5ff', '#ff00ff', '#ff8c00', '#ff6b6b', '#a78bfa', '#67e8f9'].map(color => (
                 <button
                   key={color}
+                  type="button"
+                  title={`Highlight color ${color.toUpperCase()}`}
+                  aria-label={`Highlight color ${color.toUpperCase()}`}
+                  aria-pressed={highlightColor.toLowerCase() === color.toLowerCase()}
                   onClick={() => setHighlightColor(color)}
-                  className={`w-6 h-6 rounded-full mx-auto transition-transform ${highlightColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-amber-400 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
+                  className={`w-6 h-6 rounded-full mx-auto border border-black/15 dark:border-white/20 transition-transform ${highlightColor.toLowerCase() === color.toLowerCase() ? 'scale-125 ring-2 ring-amber-400 ring-offset-2 ring-offset-panel' : 'hover:scale-110'}`}
                   style={{ backgroundColor: color }}
                 />
               ))}
@@ -955,7 +1033,10 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               <span className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Detected</span>
               <div className="flex gap-3 mt-2">
                 <span className="text-[11px] text-primary">
-                  {displayItems.filter(d => d.type === 'image').length} images
+                  {(() => {
+                    const n = displayItems.filter(d => d.type === 'image').length;
+                    return `${n} ${n === 1 ? 'image' : 'images'}`;
+                  })()}
                 </span>
                 <span className="text-[11px] text-emerald-500">
                   {displayItems.filter(d => d.type === 'path').length} drawings
@@ -980,9 +1061,14 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 <button
                   type="button"
                   onClick={() => {
-                    if (window.confirm('Clear all removed images history?')) {
-                      onClearRemovedImages();
-                    }
+                    void confirmDialog({
+                      title: 'Clear removed images?',
+                      description: 'Images in this list can no longer be restored after you clear it.',
+                      confirmLabel: 'Clear list',
+                      destructive: true,
+                    }).then((ok) => {
+                      if (ok) onClearRemovedImages();
+                    });
                   }}
                   className="text-[10px] font-medium text-app-faint hover:text-red-400 transition-colors"
                 >
@@ -1108,7 +1194,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
           <p className="text-[10px] text-app-faint leading-relaxed">
             Click an amber box on the page or a field below to edit its value.
           </p>
-          <div className="space-y-1 max-h-40 overflow-y-auto">
+          <div className="space-y-1 max-h-[min(24rem,50vh)] overflow-y-auto">
             {formFields.map((field) => (
               <button
                 key={field.ref.toKey()}
@@ -1120,52 +1206,95 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 }`}
               >
                 <div className="font-medium truncate">{field.fieldName || 'Unnamed'}</div>
-                <div className="text-[10px] text-app-faint">{field.fieldType}</div>
+                <div className="text-[10px] text-app-faint">{FIELD_TYPE_LABELS[field.fieldType] ?? 'Field'}</div>
               </button>
             ))}
           </div>
 
+          {selectedFormField?.readOnly && (
+            <p className="text-[11px] text-app-faint leading-relaxed" data-testid="form-readonly-note">
+              This field is read-only, so its value can’t be changed.
+            </p>
+          )}
+
           {selectedFormField && selectedFormField.fieldType === 'Tx' && onFormFieldChange && (
             <div className="space-y-2">
-              <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Value</label>
-              <input
-                type="text"
-                value={formFieldDraft}
-                aria-label="Field value"
-                onChange={(e) => onFormFieldChange(e.target.value)}
-                className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary"
-              />
+              <label htmlFor="form-field-value" className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Value</label>
+              {selectedFormField.multiline ? (
+                <textarea
+                  id="form-field-value"
+                  aria-label="Field value"
+                  rows={4}
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60 resize-y"
+                />
+              ) : (
+                <input
+                  id="form-field-value"
+                  aria-label="Field value"
+                  type="text"
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60"
+                />
+              )}
             </div>
           )}
 
-          {selectedFormField && selectedFormField.fieldType === 'Btn' && onFormFieldChange && (
-            <div className="space-y-2">
-              <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Checkbox / Radio</label>
-              <button
-                onClick={() => {
-                  const checked = !(selectedFormField.value === true || selectedFormField.value === 'Yes' || selectedFormField.value === 'On');
-                  onFormFieldChange(checked ? 'Yes' : 'Off');
-                }}
-                className="w-full py-2 rounded-lg text-xs font-semibold bg-panel-elevated border border-app text-app hover:bg-panel-elevated/80"
-              >
-                {(selectedFormField.value === true || selectedFormField.value === 'Yes' || selectedFormField.value === 'On')
-                  ? 'Checked — click to uncheck'
-                  : 'Unchecked — click to check'}
-              </button>
-            </div>
-          )}
+          {selectedFormField && selectedFormField.fieldType === 'Btn' && onFormFieldChange && (() => {
+            const isRadio = (selectedFormField.buttonFlags & (1 << 15)) !== 0;
+            const checked = selectedFormField.value === true || selectedFormField.value === 'Yes' || selectedFormField.value === 'On';
+            const option = selectedFormField.onState && selectedFormField.onState !== 'Yes' ? selectedFormField.onState : null;
+            return (
+              <div className="space-y-2">
+                <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">
+                  {isRadio ? 'Radio button' : 'Check box'}{option ? ` · ${option}` : ''}
+                </label>
+                <button
+                  type="button"
+                  disabled={selectedFormField.readOnly || (isRadio && checked)}
+                  onClick={() => onFormFieldChange(checked ? 'Off' : 'Yes')}
+                  className="w-full py-2 rounded-lg text-xs font-semibold bg-panel-elevated border border-app text-app hover:bg-panel-elevated/80 disabled:opacity-60"
+                >
+                  {isRadio
+                    ? (checked ? 'Selected' : 'Select this option')
+                    : (checked ? 'Checked — click to uncheck' : 'Unchecked — click to check')}
+                </button>
+              </div>
+            );
+          })()}
 
           {selectedFormField && selectedFormField.fieldType === 'Ch' && onFormFieldChange && (
             <div className="space-y-2">
-              <label className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Choice value</label>
-              <input
-                type="text"
-                value={formFieldDraft}
-                onChange={(e) => onFormFieldChange(e.target.value)}
-                aria-label="Choice value"
-                placeholder="Enter option value"
-                className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary"
-              />
+              <label htmlFor="form-field-choice" className="text-[10.5px] font-bold tracking-wider text-muted-foreground uppercase">Option</label>
+              {selectedFormField.options.length > 0 ? (
+                <select
+                  id="form-field-choice"
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60"
+                >
+                  {!selectedFormField.options.includes(formFieldDraft) && (
+                    <option value={formFieldDraft}>{formFieldDraft || 'Choose an option'}</option>
+                  )}
+                  {selectedFormField.options.map((opt) => (
+                    <option key={opt} value={opt}>{opt}</option>
+                  ))}
+                </select>
+              ) : (
+                <input
+                  id="form-field-choice"
+                  type="text"
+                  value={formFieldDraft}
+                  disabled={selectedFormField.readOnly}
+                  onChange={(e) => onFormFieldChange(e.target.value)}
+                  className="w-full px-3 py-2 text-sm bg-panel-elevated border border-app rounded-lg text-app focus:outline-none focus:border-primary disabled:opacity-60"
+                />
+              )}
             </div>
           )}
           </>
@@ -1179,7 +1308,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
           <div className="p-4 pb-2">
             <div className="flex items-center gap-2 text-[11px] font-bold tracking-wider text-foreground uppercase">
               <Stamp size={14} />
-              Watermark options
+              Watermark Properties
             </div>
           </div>
           
@@ -1214,7 +1343,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               type="button"
               role="switch"
               aria-checked={!!watermarkLivePreview}
-              aria-label="Live preview"
+              aria-label="Live Preview"
               onClick={() => setWatermarkLivePreview?.(!watermarkLivePreview)}
               className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none ${watermarkLivePreview ? 'bg-primary' : 'bg-panel-elevated border border-app'}`}
             >
@@ -1237,7 +1366,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 </div>
 
                 <div className="space-y-1.5">
-                  <label className="text-[11px] font-medium text-app">Text format:</label>
+                  <label className="text-[11px] font-medium text-app">Font:</label>
                   <select
                     value={watermarkFontName}
                     onChange={(e) => setWatermarkFontName?.(e.target.value)}
@@ -1269,7 +1398,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                   <label className="text-[11px] font-medium text-app">Shape:</label>
                   <select
                     value={watermarkShapeType}
-                    onChange={(e) => setWatermarkShapeType?.(e.target.value as any)}
+                    onChange={(e) => setWatermarkShapeType?.(e.target.value as 'rectangle' | 'circle' | 'pill')}
                     className="w-full bg-panel-elevated border border-app rounded px-3 py-2 text-xs text-app outline-none focus:border-primary transition-colors appearance-none cursor-pointer"
                   >
                     <option value="rectangle">Rectangle</option>
@@ -1320,7 +1449,8 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                       const fileInput = document.createElement('input');
                       fileInput.type = 'file';
                       fileInput.accept = 'image/png, image/jpeg';
-                      fileInput.onchange = (e) => onWatermarkImageUpload?.(e as any);
+                      fileInput.onchange = (e) =>
+                        onWatermarkImageUpload?.(e as unknown as React.ChangeEvent<HTMLInputElement>);
                       fileInput.click();
                     }}
                     className="flex items-center gap-2 bg-primary hover:brightness-105 text-primary-foreground px-8 py-3 rounded-xl text-xs font-bold transition-all"
@@ -1372,20 +1502,16 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
 
             <div className="flex gap-4">
               <div className="space-y-1.5 flex-1">
-                <label className="text-[11px] font-medium text-app">Transparency:</label>
+                <label className="text-[11px] font-medium text-app" htmlFor="watermark-opacity">Opacity:</label>
                 <select
-                  value={watermarkOpacity === 100 ? 'No transparency' : `${100 - watermarkOpacity}%`}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    if (val === 'No transparency') setWatermarkOpacity?.(100);
-                    else setWatermarkOpacity?.(100 - parseInt(val));
-                  }}
+                  id="watermark-opacity"
+                  value={String(watermarkOpacity)}
+                  onChange={(e) => setWatermarkOpacity?.(parseInt(e.target.value, 10))}
                   className="w-full bg-panel-elevated border border-app rounded px-2 py-2 text-[11px] text-app outline-none focus:border-primary transition-colors appearance-none cursor-pointer"
                 >
-                  <option value="No transparency">No transparency</option>
-                  <option value="25%">25%</option>
-                  <option value="50%">50%</option>
-                  <option value="75%">75%</option>
+                  {[100, 75, 50, 25].map(v => (
+                    <option key={v} value={String(v)}>{v === 100 ? '100% (solid)' : `${v}%`}</option>
+                  ))}
                 </select>
               </div>
               <div className="space-y-1.5 flex-1">
@@ -1415,7 +1541,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onChange={(e) => setWatermarkBlendMode?.(e.target.value)}
                 className="w-full bg-panel-elevated border border-app rounded px-2 py-2 text-[11px] text-app outline-none focus:border-primary transition-colors appearance-none cursor-pointer"
               >
-                <option value="Normal">Normal (source-over)</option>
+                <option value="Normal">Normal</option>
                 <option value="Multiply">Multiply</option>
                 <option value="Screen">Screen</option>
                 <option value="Overlay">Overlay</option>
@@ -1584,8 +1710,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                   >
                     <div className="font-medium truncate">{field.fieldName}</div>
                     <div className="text-[10px] text-app-faint">
-                      {field.signed ? 'Signed' : 'Unsigned'}
-                      {field.hasAppearance ? ' · has /AP' : ''}
+                      {joinParts(field.signed ? 'Signed' : 'Unsigned', field.hasAppearance && 'Visible')}
                     </div>
                   </button>
                 );
@@ -1659,7 +1784,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 onChange={(e) => setEnableTimestamp?.(e.target.checked)}
                 className="rounded border-app"
               />
-              Request RFC 3161 timestamp (TSA)
+              Add a trusted timestamp
             </label>
           </div>
 
@@ -1693,7 +1818,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                   </span>
                 </div>
                 <div className="text-[10px] text-app-faint">
-                  {validationReport.signatures.length} signature(s) · {validationReport.revisionCount} revision(s)
+                  {joinParts(plural(validationReport.signatures.length, 'signature'), plural(validationReport.revisionCount, 'revision'))}
                 </div>
                 {validationReport.signatures.map((s) => (
                   <div key={s.fieldId} className="text-[10px] border-t border-app pt-1">
@@ -1721,7 +1846,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
               onClick={onEnableLtv}
               className="w-full py-1.5 rounded-md bg-panel-elevated border border-app hover:bg-panel-elevated/80 text-app text-[11px] font-semibold"
             >
-              Enable LTV (embed DSS)
+              Enable long-term validation
             </button>
             {ltvStatus && (
               <p className="text-[10px] text-app-faint">{ltvStatus.summary}</p>
@@ -1744,8 +1869,7 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                     #{m.index + 1} {m.signerName || m.field.fieldName}
                   </div>
                   <div className="text-[10px] text-app-faint truncate">
-                    {m.signingTime || 'No time'} · {m.reason || 'No reason'}
-                    {m.validation ? ` · ${m.validation.status}` : ''}
+                    {joinParts(m.signingTime ? formatPdfDate(m.signingTime) : 'No signing time', m.reason || 'No reason given', m.validation?.status)}
                   </div>
                 </button>
               ))}
@@ -1753,10 +1877,10 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 <div className="text-[10px] text-app-faint space-y-0.5">
                   {revisionEntries.map((r) => (
                     <div key={r.revision.index}>
-                      Rev {r.revision.index + 1}: xref @{r.revision.xrefOffset}
-                      {r.signatureFieldIds.length
-                        ? ` · ${r.signatureFieldIds.length} sig`
-                        : ''}
+                      {joinParts(
+                        `Revision ${r.revision.index + 1}`,
+                        r.signatureFieldIds.length > 0 && plural(r.signatureFieldIds.length, 'signature'),
+                      )}
                     </div>
                   ))}
                 </div>

@@ -3,6 +3,7 @@ import { knuthPlassWrap, greedyWrap } from '../flow/line-break';
 import { resolveBidiLevels, reorderForDisplay } from '../flow/bidi';
 import { moveCaret, graphemeClusters } from '../flow/caret';
 import { resolveStyledFontName, mapSelectionToSegments } from '../flow/style-edit';
+import type { StyledSegment } from '../flow/types';
 import { invertAffine, composeTransform, multiplyAffine } from '../editing/transform-editor';
 import { lineSelectionToQuadPoints } from '../flow/selection-quads';
 import { comparePageText } from '../ai/compare';
@@ -61,8 +62,8 @@ describe('style-edit helpers', () => {
     const line = {
       text: 'HelloWorld',
       segments: [
-        { startIndex: 0, endIndex: 5, text: 'Hello', run: {} as any },
-        { startIndex: 5, endIndex: 10, text: 'World', run: {} as any },
+        { startIndex: 0, endIndex: 5, text: 'Hello', run: {} as StyledSegment['run'] },
+        { startIndex: 5, endIndex: 10, text: 'World', run: {} as StyledSegment['run'] },
       ],
     } as TextLine;
     const hits = mapSelectionToSegments(line, 3, 7);

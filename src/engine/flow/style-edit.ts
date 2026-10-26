@@ -561,7 +561,7 @@ function listPageFonts(
 ): Array<{ key: string; baseFont: string }> {
   const out: Array<{ key: string; baseFont: string }> = [];
   const resourcesObj = page.dict.get('Resources');
-  let resources = resourcesObj instanceof PDFRef ? resolveRef(resourcesObj, objects) : resourcesObj;
+  const resources = resourcesObj instanceof PDFRef ? resolveRef(resourcesObj, objects) : resourcesObj;
   if (!(resources instanceof PDFDict)) return out;
   let fontDict = resources.get('Font');
   if (fontDict instanceof PDFRef) fontDict = resolveRef(fontDict, objects);
@@ -650,6 +650,11 @@ export interface StyleApplyOptions {
    * catches true collisions.
    */
   skipTrailingFontSizeShifts?: boolean;
+  /**
+   * Column the line is aligned within. Without it, alignment falls back to
+   * symmetric page margins around the line's left edge.
+   */
+  alignBounds?: { left: number; right: number };
 }
 
 /**
@@ -711,7 +716,12 @@ export function applyStyleToSelection(
     }
   }
 
-  for (const [run, range] of byRun) {
+  // Right to left: ops inserted for one run must not shift the source
+  // indices of runs still to be patched.
+  const ordered = [...byRun].sort(
+    (a, b) => Math.min(...(b[0].sourceInstructionIndices ?? [0])) - Math.min(...(a[0].sourceInstructionIndices ?? [0])),
+  );
+  for (const [run, range] of ordered) {
     const patched = patchRunStyle(
       bytes, run, style, page, objects, range.localStart, range.localEnd,
     );
@@ -730,7 +740,11 @@ export function applyStyleToSelection(
   }
 
   if (style.align && line.runs.length > 0) {
-    bytes = applyAlignmentShift(bytes, line, style.align);
+    const bounds = options?.alignBounds ?? {
+      left: line.leftMargin,
+      right: page.mediaBox.x + page.mediaBox.width - (line.leftMargin - page.mediaBox.x),
+    };
+    bytes = applyAlignmentShift(bytes, line, style.align, bounds);
   }
 
   return {
@@ -764,8 +778,13 @@ export async function applyStyleToSelectionOnPage(
 ): Promise<StyleEditResult> {
   const page = doc.pages[pageIndex];
   const contentBytes = getPageContentBytes(page, doc.objects);
+  let opts = options;
+  if (style.align && !opts?.alignBounds) {
+    const lines = reconstructLines(interpretPage(contentBytes, page, doc.objects).textRuns);
+    opts = { ...opts, alignBounds: alignmentBoundsForLine(line, lines, page) };
+  }
   const result = applyStyleToSelection(
-    contentBytes, page, doc.objects, line, selectionStart, selectionEnd, style, options,
+    contentBytes, page, doc.objects, line, selectionStart, selectionEnd, style, opts,
   );
   await updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
   return result;
@@ -1013,7 +1032,8 @@ function patchRunStyle(
 
       // 2) Fall back to Standard14 face we can inject
       if (!fontKey) {
-        const desired = resolveStyledFontName(run.fontName, wantBold, wantItalic);
+        // run.fontName is the resource key (F1); the family comes from BaseFont.
+        const desired = resolveStyledFontName(fontDataForFlags?.baseFont || run.fontName, wantBold, wantItalic);
         fontKey = ensureStandard14Font(page, objects, desired);
       }
     }
@@ -1077,6 +1097,26 @@ function patchRunStyle(
   return { bytes: compileInstructions(instructions), addedUnderline, removedUnderline };
 }
 
+const SHOWING_OPS = new Set(['Tj', 'TJ', "'", '"']);
+
+/**
+ * True when the Tf at `tfIdx` governs only this run's text-showing ops.
+ * Text state outlives BT/ET, so a later text object that shows text before
+ * setting its own font also depends on it.
+ */
+function tfIsExclusiveToRun(
+  instructions: CSInstruction[],
+  tfIdx: number,
+  runShowing: Set<number>,
+): boolean {
+  for (let i = tfIdx + 1; i < instructions.length; i++) {
+    const op = instructions[i].operator;
+    if (op === 'Tf') return true;
+    if (SHOWING_OPS.has(op) && !runShowing.has(i)) return false;
+  }
+  return true;
+}
+
 function applyWholeRunFontPatch(
   instructions: CSInstruction[],
   run: TextRun,
@@ -1087,35 +1127,62 @@ function applyWholeRunFontPatch(
 ): void {
   const range2 = findBtEtRange(instructions, textIndex) ?? range;
 
-  for (let i = textIndex; i >= range2.bt; i--) {
+  // Governing Tf: inside this text object, else the last one before it.
+  let tfIdx = -1;
+  for (let i = textIndex; i >= 0; i--) {
     if (instructions[i].operator === 'Tf' && instructions[i].operands.length >= 2) {
-      if (style.fontSize != null) {
-        const tfSize = instructions[i].operands[1];
-        const curTf = tfSize instanceof PDFNumber ? tfSize.value : run.fontSize;
-        const visual = visualFontSize(run);
-        if (curTf > 0 && curTf <= 1.5 && Math.abs(visual - curTf) > 1) {
-          const scale = style.fontSize / visual;
-          for (let j = textIndex; j >= range2.bt; j--) {
-            if (instructions[j].operator === 'Tm' && instructions[j].operands.length >= 6) {
-              for (const idx of [0, 1, 2, 3]) {
-                const n = instructions[j].operands[idx];
-                if (n instanceof PDFNumber) {
-                  instructions[j].operands[idx] = new PDFNumber(n.value * scale);
-                }
-              }
-              break;
-            }
-          }
-        } else {
-          instructions[i].operands[1] = new PDFNumber(style.fontSize);
-        }
-      }
-      if (fontKey) {
-        instructions[i].operands[0] = new PDFName(fontKey);
-      }
+      tfIdx = i;
       break;
     }
   }
+  const tfInBt = tfIdx >= range2.bt;
+
+  // Tiny Tf with the size carried by Tm (Tf 1 + scaled Tm): scale the Tm.
+  if (style.fontSize != null && tfInBt) {
+    const tfSize = instructions[tfIdx].operands[1];
+    const curTf = tfSize instanceof PDFNumber ? tfSize.value : run.fontSize;
+    const visual = visualFontSize(run);
+    if (curTf > 0 && curTf <= 1.5 && Math.abs(visual - curTf) > 1) {
+      const scale = style.fontSize / visual;
+      for (let j = textIndex; j >= range2.bt; j--) {
+        if (instructions[j].operator === 'Tm' && instructions[j].operands.length >= 6) {
+          for (const idx of [0, 1, 2, 3]) {
+            const n = instructions[j].operands[idx];
+            if (n instanceof PDFNumber) {
+              instructions[j].operands[idx] = new PDFNumber(n.value * scale);
+            }
+          }
+          break;
+        }
+      }
+      if (!fontKey) return;
+      style = { ...style, fontSize: undefined };
+    }
+  }
+  if (style.fontSize == null && !fontKey) return;
+
+  const runShowing = new Set(
+    (run.sourceInstructionIndices ?? []).filter((i) => SHOWING_OPS.has(instructions[i]?.operator)),
+  );
+  runShowing.add(textIndex);
+
+  if (tfInBt && tfIsExclusiveToRun(instructions, tfIdx, runShowing)) {
+    if (style.fontSize != null) instructions[tfIdx].operands[1] = new PDFNumber(style.fontSize);
+    if (fontKey) instructions[tfIdx].operands[0] = new PDFName(fontKey);
+    return;
+  }
+
+  // The Tf is shared with other lines (T* paragraphs, or a font set once for
+  // several text objects): set the new face just for this run and restore
+  // the original afterwards, so only this line changes (BE-102).
+  const origName = tfIdx >= 0 ? instructions[tfIdx].operands[0] : new PDFName(run.fontName);
+  const origSizeOp = tfIdx >= 0 ? instructions[tfIdx].operands[1] : new PDFNumber(run.fontSize);
+  const origSize = origSizeOp instanceof PDFNumber ? origSizeOp.value : run.fontSize;
+  const newName = fontKey ? new PDFName(fontKey) : origName;
+  const newSize = style.fontSize ?? origSize;
+  const lastShow = Math.max(...runShowing);
+  instructions.splice(lastShow + 1, 0, op('Tf', [origName, new PDFNumber(origSize)]));
+  instructions.splice(textIndex, 0, op('Tf', [newName, new PDFNumber(newSize)]));
 }
 
 function widthUpToChar(run: TextRun, charCount: number): number {
@@ -1364,45 +1431,70 @@ function removeUnderlineNearRun(instructions: CSInstruction[], run: TextRun): bo
   return removed;
 }
 
+/**
+ * The column a line sits in: lines that overlap it horizontally share its
+ * left edge, and the right edge is the wider of their right edges and the
+ * page's symmetric right margin.
+ */
+export function alignmentBoundsForLine(
+  line: TextLine,
+  lines: TextLine[],
+  page: PDFPageInfo,
+): { left: number; right: number } {
+  const lineRight = line.x + line.width;
+  const peers = lines.filter((l) => l.x < lineRight && l.x + l.width > line.x);
+  const left = Math.min(line.x, ...peers.map((l) => l.x));
+  const pageRight = page.mediaBox.x + page.mediaBox.width;
+  const symmetricRight = pageRight - (left - page.mediaBox.x);
+  const right = Math.max(symmetricRight, ...peers.map((l) => l.x + l.width));
+  return { left, right: Math.min(right, pageRight) };
+}
+
+/** Move every run of the line so it sits left, centred or right in `bounds`. */
 function applyAlignmentShift(
   contentBytes: Uint8Array,
   line: TextLine,
   align: 'left' | 'center' | 'right',
+  bounds: { left: number; right: number },
 ): Uint8Array {
-  if (align === 'left' || line.runs.length === 0) return contentBytes;
+  if (line.runs.length === 0) return contentBytes;
+  const width = line.width;
+  const span = bounds.right - bounds.left;
+  if (span <= 0) return contentBytes;
 
-  const natural = line.width;
-  const target = line.rightEdge - line.leftMargin;
-  if (target <= 0) return contentBytes;
-
-  let dx = 0;
-  if (align === 'center') dx = (target - natural) / 2;
-  if (align === 'right') dx = target - natural;
+  let targetX = bounds.left;
+  if (align === 'center') targetX = bounds.left + (span - width) / 2;
+  if (align === 'right') targetX = bounds.right - width;
+  const dx = targetX - line.x;
   if (Math.abs(dx) < 0.01) return contentBytes;
 
+  // Bracket the line's text-showing ops in each text object with a pair of
+  // Td moves (+dx before, −dx after). Editing the text object's Tm or Td
+  // instead would also move later lines that position relative to it (T*
+  // paragraphs), aligning the whole paragraph rather than this line.
   const instructions = parseContentStream(contentBytes);
-  const first = line.runs[0];
-  const indices = first.sourceInstructionIndices ?? [];
-  if (indices.length === 0) return contentBytes;
+  const showing = [...new Set(line.runs.flatMap((r) => r.sourceInstructionIndices ?? []))]
+    .filter((i) => SHOWING_OPS.has(instructions[i]?.operator))
+    .sort((a, b) => a - b);
+  if (showing.length === 0) return contentBytes;
 
-  const textIndex = Math.min(...indices);
-  // Prefer adjusting existing Tm/Td rather than inserting a new Td
-  for (let i = textIndex; i >= 0; i--) {
-    if (instructions[i].operator === 'BT') break;
-    if (instructions[i].operator === 'Tm' && instructions[i].operands.length >= 6) {
-      const e = instructions[i].operands[4];
-      const cur = e instanceof PDFNumber ? e.value : 0;
-      instructions[i].operands[4] = new PDFNumber(cur + dx);
-      return compileInstructions(instructions);
-    }
-    if ((instructions[i].operator === 'Td' || instructions[i].operator === 'TD') && instructions[i].operands.length >= 2) {
-      const x = instructions[i].operands[0];
-      const cur = x instanceof PDFNumber ? x.value : 0;
-      instructions[i].operands[0] = new PDFNumber(cur + dx);
-      return compileInstructions(instructions);
-    }
+  const groups = new Map<number, number[]>();
+  for (const i of showing) {
+    const range = findBtEtRange(instructions, i);
+    if (!range) return contentBytes;
+    const list = groups.get(range.bt) ?? [];
+    list.push(i);
+    groups.set(range.bt, list);
   }
-  return contentBytes;
+  // Insert from the end so earlier indices stay valid.
+  const ordered = [...groups.values()].sort((a, b) => b[0] - a[0]);
+  for (const list of ordered) {
+    const first = list[0];
+    const last = list[list.length - 1];
+    instructions.splice(last + 1, 0, op('Td', [new PDFNumber(-dx), new PDFNumber(0)]));
+    instructions.splice(first, 0, op('Td', [new PDFNumber(dx), new PDFNumber(0)]));
+  }
+  return compileInstructions(instructions);
 }
 
 /**
@@ -1432,9 +1524,24 @@ export function duplicateLineBelow(
     if (seenRanges.has(key)) continue;
     seenRanges.add(key);
 
-    const slice = instructions.slice(range.bt, range.et + 1).map(cloneInstruction);
-    shiftInstructionsY(slice, dy);
-    clones.push(...slice);
+    // The copy is appended at the end of the stream, so it must carry the
+    // state the original relied on: the CTM from enclosing cm operators, and
+    // the font and fill colour, which may have been set outside this BT.
+    const ctm = ctmAt(instructions, range.bt);
+    const scaleY = Math.abs(ctm[3]) > 1e-6 ? ctm[3] : 1;
+    const body = instructions.slice(range.bt + 1, range.et).map(cloneInstruction);
+    shiftInstructionsY(body, dy / scaleY);
+    const color = run.fillColor ?? [0, 0, 0];
+    clones.push(
+      op('q'),
+      op('cm', ctm.map(n => new PDFNumber(n))),
+      op('rg', [new PDFNumber(color[0]), new PDFNumber(color[1]), new PDFNumber(color[2])]),
+      op('BT'),
+      op('Tf', [new PDFName(run.fontName.replace(/^\//, '')), new PDFNumber(run.fontSize || visualFontSize(run))]),
+      ...body,
+      op('ET'),
+      op('Q'),
+    );
   }
 
   if (clones.length === 0) {
@@ -1462,43 +1569,154 @@ export function duplicateLineBelow(
   return compileInstructions(instructions);
 }
 
-/** Duplicate every line in a table row one row-height below (Add Row). */
+/**
+ * Add Row: move the rows below down by one row pitch, then copy the row into
+ * the gap. `rowPitch` is the distance between row baselines when known.
+ */
 export function duplicateTableRowBelow(
   contentBytes: Uint8Array,
   rowLines: TextLine[],
+  linesBelow: TextLine[] = [],
+  rowPitch?: number,
 ): Uint8Array {
   if (rowLines.length === 0) return contentBytes;
   const heights = rowLines.map(l =>
     Math.max(l.fontSize, l.runs[0] ? visualFontSize(l.runs[0]) : l.fontSize) * 1.35,
   );
-  const dy = -Math.max(...heights, 14);
-  let bytes = contentBytes;
+  const dy = -(rowPitch && rowPitch > 0 ? rowPitch : Math.max(...heights, 14));
+  let bytes = shiftLinesY(contentBytes, linesBelow, dy);
   for (const line of rowLines) {
     bytes = duplicateLineBelow(bytes, line, dy);
   }
-  return bytes;
+  const baseline = Math.min(...rowLines.map(l => l.baseline));
+  return shiftTablePathsForNewRow(bytes, baseline, -dy);
 }
 
+const PATH_BUILD_OPS = new Set(['m', 'l', 'c', 'v', 'y', 'h', 're']);
+const PATH_PAINT_OPS = new Set(['S', 's', 'f', 'F', 'f*', 'B', 'B*', 'b', 'b*', 'n']);
+
+type Ctm = [number, number, number, number, number, number];
+const mulCtm = (m: Ctm, n: Ctm): Ctm => [
+  m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3],
+  m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3],
+  m[4] * n[0] + m[5] * n[2] + n[4], m[4] * n[1] + m[5] * n[3] + n[5],
+];
+
 /**
- * Add a blank column to the right of a table by inserting empty (or " ") text
- * at each row, aligned after the rightmost cell.
+ * Make a table's borders and cell backgrounds follow a row inserted below
+ * the row on `baseline` (BE-103). Paths below the row move down by `pitch`,
+ * paths inside the row are copied one pitch lower (backgrounds, the row's
+ * borders), and grid lines that run through the row get longer.
+ */
+export function shiftTablePathsForNewRow(contentBytes: Uint8Array, baseline: number, pitch: number): Uint8Array {
+  const instructions = parseContentStream(contentBytes);
+  const num = (o: PDFObject | undefined) => (o instanceof PDFNumber ? o.value : 0);
+
+  type Block = { start: number; end: number; ctm: Ctm; ys: number[]; clip: boolean };
+  const blocks: Block[] = [];
+  const stack: Ctm[] = [];
+  let ctm: Ctm = [1, 0, 0, 1, 0, 0];
+  let start = -1;
+  let clip = false;
+  for (let i = 0; i < instructions.length; i++) {
+    const { operator: o, operands } = instructions[i];
+    if (o === 'q') stack.push(ctm);
+    else if (o === 'Q') ctm = stack.pop() ?? ctm;
+    else if (o === 'cm' && operands.length >= 6) ctm = mulCtm(operands.slice(0, 6).map(num) as Ctm, ctm);
+    else if (PATH_BUILD_OPS.has(o)) { if (start < 0) start = i; }
+    else if (o === 'W' || o === 'W*') clip = true;
+    else if (PATH_PAINT_OPS.has(o)) {
+      if (start >= 0) {
+        const ys: number[] = [];
+        for (let j = start; j < i; j++) {
+          const ins = instructions[j];
+          const v = ins.operands.map(num);
+          const pts: [number, number][] = ins.operator === 're'
+            ? [[v[0], v[1]], [v[0] + v[2], v[1] + v[3]]]
+            : ins.operator === 'h' ? [] : Array.from({ length: v.length / 2 }, (_, k) => [v[2 * k], v[2 * k + 1]] as [number, number]);
+          for (const [x, y] of pts) ys.push(ctm[1] * x + ctm[3] * y + ctm[5]);
+        }
+        if (o !== 'n' && ys.length > 0) blocks.push({ start, end: i, ctm, ys, clip });
+      }
+      start = -1;
+      clip = false;
+    }
+  }
+
+  // The row's bottom border: the nearest horizontal edge below the baseline.
+  const eps = 0.5;
+  const edges = blocks.flatMap(b => b.ys).filter(y => y < baseline && y > baseline - pitch);
+  const rowBottom = edges.length > 0 ? Math.max(...edges) : baseline - pitch * 0.3;
+  const rowTop = rowBottom + pitch;
+
+  const shiftOps = (ctmAt: Ctm, block: CSInstruction[]): CSInstruction[] => {
+    // Translate by −pitch in page space, expressed in the block's local space.
+    const det = ctmAt[0] * ctmAt[3] - ctmAt[1] * ctmAt[2];
+    if (Math.abs(det) < 1e-9) return block;
+    const tx = (ctmAt[2] * pitch) / det;
+    const ty = (-ctmAt[0] * pitch) / det;
+    return [op('q'), op('cm', [1, 0, 0, 1, tx, ty].map(n => new PDFNumber(n))), ...block, op('Q')];
+  };
+
+  let changed = false;
+  for (let k = blocks.length - 1; k >= 0; k--) {
+    const b = blocks[k];
+    if (b.clip) continue;
+    const top = Math.max(...b.ys);
+    const bottom = Math.min(...b.ys);
+    const block = instructions.slice(b.start, b.end + 1);
+    if (top <= rowBottom + eps) {
+      instructions.splice(b.start, block.length, ...shiftOps(b.ctm, block));
+      changed = true;
+    } else if (bottom >= rowBottom - eps && top <= rowTop + eps) {
+      const copy = block.map(ins => ({ ...ins, operands: [...ins.operands] }));
+      instructions.splice(b.end + 1, 0, ...shiftOps(b.ctm, copy));
+      changed = true;
+    } else if (bottom < rowBottom - eps && b.ctm[1] === 0 && b.ctm[2] === 0 && b.ctm[3] !== 0) {
+      // Grid line through the row: move its lower end(s) down.
+      const d = b.ctm[3];
+      const f = b.ctm[5];
+      const lower = (yl: number) => (d * yl + f <= rowBottom + eps ? yl - pitch / d : yl);
+      for (let j = b.start; j < b.end; j++) {
+        const ins = instructions[j];
+        if (ins.operator === 're') {
+          const v = ins.operands.map(num);
+          const y0 = lower(v[1]);
+          const y1 = lower(v[1] + v[3]);
+          ins.operands = [v[0], y0, v[2], y1 - y0].map(n => new PDFNumber(n));
+        } else if (ins.operator !== 'h') {
+          ins.operands = ins.operands.map((o, idx) => (idx % 2 === 1 ? new PDFNumber(lower(num(o))) : o));
+        }
+      }
+      changed = true;
+    }
+  }
+  return changed ? compileInstructions(instructions) : contentBytes;
+}
+
+/** Text placed in each cell of a column added with Add Column Right. */
+export const NEW_COLUMN_PLACEHOLDER = 'New';
+
+/**
+ * Add a column to the right of a table: one placeholder cell per row, all
+ * left-aligned on the same x after the widest row, on each row's baseline.
  */
 export function insertTableColumnRight(
   contentBytes: Uint8Array,
   rowLines: TextLine[][],
 ): Uint8Array {
-  let bytes = contentBytes;
-  for (const row of rowLines) {
-    if (row.length === 0) continue;
+  const rows = rowLines.filter(r => r.length > 0);
+  if (rows.length === 0) return contentBytes;
+  const tableRight = Math.max(...rows.flat().map(l => l.rightEdge));
+  const instructions = parseContentStream(contentBytes);
+  for (const row of rows) {
     const rightmost = [...row].sort((a, b) => b.rightEdge - a.rightEdge)[0];
     const run = rightmost.runs[0];
     if (!run) continue;
     const fs = visualFontSize(run);
-    const gap = Math.max(fs * 2.5, 20);
-    const x = rightmost.rightEdge + gap;
-    const y = run.y;
+    const x = tableRight + Math.max(fs * 1.5, 12);
+    const y = rightmost.baseline;
     const color = run.fillColor ?? [0, 0, 0];
-    const instructions = parseContentStream(bytes);
     instructions.push(
       op('q'),
       op('BT'),
@@ -1508,13 +1726,72 @@ export function insertTableColumnRight(
         new PDFNumber(1), new PDFNumber(0), new PDFNumber(0), new PDFNumber(1),
         new PDFNumber(x), new PDFNumber(y),
       ]),
-      op('Tj', [new PDFString(' ')]),
+      // A visible, editable placeholder: a blank cell gave no feedback at all.
+      op('Tj', [new PDFString(NEW_COLUMN_PLACEHOLDER)]),
       op('ET'),
       op('Q'),
     );
-    bytes = compileInstructions(instructions);
   }
-  return bytes;
+  return compileInstructions(instructions);
+}
+
+/** Move the text objects of the given lines vertically by dy (user space). */
+function shiftLinesY(contentBytes: Uint8Array, lines: TextLine[], dy: number): Uint8Array {
+  if (lines.length === 0 || dy === 0) return contentBytes;
+  const instructions = parseContentStream(contentBytes);
+  const done = new Set<number>();
+  for (const line of lines) {
+    for (const run of line.runs) {
+      const indices = run.sourceInstructionIndices ?? [];
+      if (indices.length === 0) continue;
+      const range = findBtEtRange(instructions, Math.min(...indices));
+      if (!range || done.has(range.bt)) continue;
+      done.add(range.bt);
+      const ctm = ctmAt(instructions, range.bt);
+      const scaleY = Math.abs(ctm[3]) > 1e-6 ? ctm[3] : 1;
+      // Only the first positioning operator is absolute for the object;
+      // later Td/T* are relative and move with it.
+      for (let i = range.bt + 1; i < range.et; i++) {
+        const inst = instructions[i];
+        if (inst.operator === 'Tm' && inst.operands.length >= 6) {
+          const f = inst.operands[5];
+          if (f instanceof PDFNumber) inst.operands[5] = new PDFNumber(f.value + dy / scaleY);
+          break;
+        }
+        if ((inst.operator === 'Td' || inst.operator === 'TD') && inst.operands.length >= 2) {
+          const y = inst.operands[1];
+          if (y instanceof PDFNumber) inst.operands[1] = new PDFNumber(y.value + dy / scaleY);
+          break;
+        }
+      }
+    }
+  }
+  return compileInstructions(instructions);
+}
+
+type Matrix6 = [number, number, number, number, number, number];
+
+/** Current transformation matrix in effect just before instruction `index`. */
+function ctmAt(instructions: CSInstruction[], index: number): Matrix6 {
+  const num = (o: unknown) => (o instanceof PDFNumber ? o.value : 0);
+  let ctm: Matrix6 = [1, 0, 0, 1, 0, 0];
+  const stack: Matrix6[] = [];
+  for (let i = 0; i < index && i < instructions.length; i++) {
+    const inst = instructions[i];
+    if (inst.operator === 'q') stack.push(ctm);
+    else if (inst.operator === 'Q') ctm = stack.pop() ?? [1, 0, 0, 1, 0, 0];
+    else if (inst.operator === 'cm' && inst.operands.length >= 6) {
+      const [a, b, c, d, e, f] = inst.operands.map(num);
+      const [A, B, C, D, E, F] = ctm;
+      // m × ctm (PDF row-vector convention)
+      ctm = [
+        a * A + b * C, a * B + b * D,
+        c * A + d * C, c * B + d * D,
+        e * A + f * C + E, e * B + f * D + F,
+      ];
+    }
+  }
+  return ctm;
 }
 
 function cloneInstruction(inst: CSInstruction): CSInstruction {

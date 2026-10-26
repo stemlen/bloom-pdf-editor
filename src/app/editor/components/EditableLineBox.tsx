@@ -2,6 +2,7 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { GripHorizontal } from 'lucide-react';
+import { useWindowPointerDrag } from '../hooks/usePointerDrag';
 
 /** One styled fragment inside the line editor (mirrors PDF runs). */
 export interface OverlaySegmentStyle {
@@ -224,13 +225,17 @@ export function EditableLineBox(props: EditableLineBoxProps) {
 
     // Recompute ends after scale settles
     requestAnimationFrame(() => rebuildCharEnds());
-  }, [text, fontSizeCss, fontFamily, fontWeight, fontStyle, segments, naturalWidth, naturalHeight, left, top, rebuildCharEnds]);
+  }, [text, fontSizeCss, fontFamily, fontWeight, fontStyle, segments, hasSegments, naturalWidth, naturalHeight, left, top, rebuildCharEnds]);
 
   // Sync custom caret / selection highlight to controlled indices
   useLayoutEffect(() => {
     rebuildCharEnds();
     const a = Math.max(0, Math.min(caretStart, text.length));
     const b = Math.max(a, Math.min(caretEnd, text.length));
+    // Caret / selection geometry comes from measuring the rendered glyphs
+    // (rebuildCharEnds reads the DOM), so it can only be computed after layout.
+    // Updating state in a layout effect is the intended pattern for this.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setCaretPx(indexToX(b));
     setSelLeftPx(indexToX(Math.min(a, b)));
     setSelWidthPx(Math.abs(indexToX(b) - indexToX(a)));
@@ -283,9 +288,9 @@ export function EditableLineBox(props: EditableLineBoxProps) {
 
   const endDrag = useCallback(() => {
     dragMode.current = null;
-    window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', endDrag);
-  }, [onPointerMove]);
+  }, []);
+
+  const attachDragListeners = useWindowPointerDrag(onPointerMove, endDrag);
 
   const startDrag = useCallback((mode: DragMode, e: React.PointerEvent) => {
     e.preventDefault();
@@ -299,9 +304,8 @@ export function EditableLineBox(props: EditableLineBoxProps) {
       w: width,
       h: height,
     };
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', endDrag);
-  }, [offsetCssX, offsetCssY, width, height, onPointerMove, endDrag]);
+    attachDragListeners();
+  }, [offsetCssX, offsetCssY, width, height, attachDragListeners]);
 
   const hitLocalX = (e: React.PointerEvent) => {
     const box = e.currentTarget.getBoundingClientRect();

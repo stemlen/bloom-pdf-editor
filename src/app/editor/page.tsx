@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState, useRef, useCallback } from 'react';
+import { joinParts } from '@/lib/format';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useState, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import {
   loadPdfFromStorage,
@@ -16,7 +17,7 @@ import { X, Loader2, ChevronLeft, Image, Type, Copy, RotateCw } from 'lucide-rea
 
 // We import types only — the engine modules are loaded dynamically
 // because they require browser APIs (canvas, DecompressionStream)
-import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, TextLine, ImageItem, PathItem, DisplayItem, TextWatermark, ImageWatermark, Watermark, DetectedWatermark, AcroFormWidget, BloomPage, DetectedTable, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry } from '@/engine';
+import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, TextLine, ImageItem, PathItem, DisplayItem, TextWatermark, ImageWatermark, Watermark, WatermarkPosition, DetectedWatermark, AcroFormWidget, BloomPage, DetectedTable, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry } from '@/engine';
 
 import type { EditorTool, ToolDef, PathType, DrawnPath, FloatingText, FloatingImage, DrawMode, RemovedImageRecord } from './types';
 import { TOOLS } from './types';
@@ -26,7 +27,7 @@ import {
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
 } from './utils';
-import { buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
+import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
 import { findMatchingFlowLine } from './flowLineMatch';
 
@@ -40,6 +41,10 @@ import { SignatureOverlay } from './components/signatures/SignatureOverlay';
 import { SignatureCreateDialog, type SignatureCreateResult } from './components/signatures/SignatureCreateDialog';
 import { CertificateImportDialog } from './components/signatures/CertificateImportDialog';
 import { WatermarkPreview } from './components/WatermarkPreview';
+import { hitTestDrawnPath, drawnPathBounds } from './drawingHitTest';
+import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
+import { ConfirmDialogHost, confirmDialog, noticeDialog } from './components/ConfirmDialog';
+import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
 import { FindReplacePanel } from './components/FindReplacePanel';
 import { StatusBar } from './components/StatusBar';
@@ -50,6 +55,7 @@ import { useTextStyleActions, type TextStyleUI } from './hooks/useTextStyleActio
 import { useIsMobile } from './hooks/useIsMobile';
 import { Lotus } from '@/components/art/Doodles';
 import { LostPageIllustration } from '@/components/art/Illustrations';
+import { friendlyPdfError, actionErrorMessage } from '@/lib/pdfErrors';
 
 export interface SearchMatch {
   id: string;
@@ -293,6 +299,12 @@ function cssFontFamilyFromUI(name: string): string {
 
 // ─── Component ──────────────────────────────────────────────────────────────
 
+
+const LINK_NEEDS_SELECTION = 'Select the text you want to link first, then choose Add Link to Selection.';
+
+/** Style a new text box starts with. */
+const DEFAULT_TEXT_STYLE = { fontFamily: 'Helvetica', fontSize: 12, color: '#000000' } as const;
+
 export default function EditorPage() {
   const router = useRouter();
 
@@ -315,6 +327,8 @@ export default function EditorPage() {
   const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
 
   const [activeTool, setActiveTool] = useState<EditorTool>('text');
+  /** Redaction marks placed on the current page and not applied yet. */
+  const [redactionMarkCount, setRedactionMarkCount] = useState(0);
   const [isPanelOpen, setIsPanelOpen] = useState(true);
   const isMobile = useIsMobile();
   const [showMobileThumbnails, setShowMobileThumbnails] = useState(false);
@@ -336,6 +350,12 @@ export default function EditorPage() {
   }, []);
   const initialRunTextRef = useRef<string>('');
   const editAnchorLineRef = useRef<TextLine | null>(null);
+  /** Render-safe mirror of editAnchorLineRef (refs must not be read during render). */
+  const [editAnchorLine, setEditAnchorLineState] = useState<TextLine | null>(null);
+  const setEditAnchorLine = useCallback((line: TextLine | null) => {
+    editAnchorLineRef.current = line;
+    setEditAnchorLineState(line);
+  }, []);
   /** Pending style patches queued while typing, each with a char range. */
   const pendingStylesRef = useRef<Array<{ patch: Partial<TextStyleUI>; start: number; end: number }>>([]);
   /** Word-like typing style: applies to newly typed chars when caret is collapsed. */
@@ -368,6 +388,12 @@ export default function EditorPage() {
   // Drawing state
   const [isDrawing, setIsDrawing] = useState(false);
   const [drawnPaths, setDrawnPaths] = useState<DrawnPath[]>([]);
+  /** Drawing picked with the Select tool: an unsaved stroke or a saved markup annotation (BE-307). */
+  const [selectedDrawing, setSelectedDrawing] = useState<
+    | { kind: 'overlay'; id: string }
+    | { kind: 'annot'; refKey: string; rect: { x: number; y: number; width: number; height: number } }
+    | null
+  >(null);
   const [drawMode, setDrawMode] = useState<DrawMode>('freehand');
   const currentDrawPath = useRef<{ x: number; y: number }[]>([]);
   const shapeStartRef = useRef<{ x: number; y: number } | null>(null);
@@ -404,7 +430,6 @@ export default function EditorPage() {
   /** Removed / deleted images bin for instant restoration */
   const [removedImages, setRemovedImages] = useState<RemovedImageRecord[]>([]);
   const removedImagesRef = useRef<RemovedImageRecord[]>([]);
-  removedImagesRef.current = removedImages;
 
   const dragInfo = useRef<{ id: string; type: 'text' | 'image'; startX: number; startY: number; startPdfX: number; startPdfY: number } | null>(null);
 
@@ -436,17 +461,19 @@ export default function EditorPage() {
   const [watermarkOpacity, setWatermarkOpacity] = useState(50);
   const [watermarkRotation, setWatermarkRotation] = useState(45);
   const [watermarkSize, setWatermarkSize] = useState(50);
-  const [watermarkPosition, setWatermarkPosition] = useState('center');
+  const [watermarkPosition, setWatermarkPosition] = useState<WatermarkPosition>('center');
   const [watermarkMosaic, setWatermarkMosaic] = useState(false);
   const [watermarkLivePreview, setWatermarkLivePreview] = useState(true);
   const [showApplySuccessModal, setShowApplySuccessModal] = useState(false);
   const [watermarkPageFrom, setWatermarkPageFrom] = useState(1);
   const [watermarkPageTo, setWatermarkPageTo] = useState(1);
   // Watermark the whole document by default (the range follows the page count).
-  useEffect(() => {
+  const [watermarkRangeTotal, setWatermarkRangeTotal] = useState(totalPages);
+  if (watermarkRangeTotal !== totalPages) {
+    setWatermarkRangeTotal(totalPages);
     setWatermarkPageFrom(1);
     setWatermarkPageTo(Math.max(1, totalPages));
-  }, [totalPages]);
+  }
   const [watermarkLayer, setWatermarkLayer] = useState<'above' | 'below'>('above');
   const [watermarkColor, setWatermarkColor] = useState('#000000');
   const [watermarkImageFile, setWatermarkImageFile] = useState<File | null>(null);
@@ -479,11 +506,8 @@ export default function EditorPage() {
   const undoSnapshotRef = useRef<{ pageIndex: number; contentBytes: Uint8Array } | null>(null);
 
   const drawnPathsRef = useRef<DrawnPath[]>([]);
-  drawnPathsRef.current = drawnPaths;
   const floatingTextsRef = useRef<FloatingText[]>([]);
-  floatingTextsRef.current = floatingTexts;
   const floatingImagesRef = useRef<FloatingImage[]>([]);
-  floatingImagesRef.current = floatingImages;
   const signaturesRef = useRef<VisualSignature[]>([]);
   const committingPromiseRef = useRef<Promise<void> | null>(null);
 
@@ -492,9 +516,11 @@ export default function EditorPage() {
     setCanRedo(historyRef.current.canRedo());
   }, []);
 
-  const [textFontFamily, setTextFontFamily] = useState('Helvetica');
-  const [textFontSize, setTextFontSize] = useState(12);
-  const [textColor, setTextColor] = useState('#000000');
+  const [textFontFamily, setTextFontFamily] = useState<string>(DEFAULT_TEXT_STYLE.fontFamily);
+  const [textFontSize, setTextFontSize] = useState<number>(DEFAULT_TEXT_STYLE.fontSize);
+  const [textColor, setTextColor] = useState<string>(DEFAULT_TEXT_STYLE.color);
+  /** Floating text box that should take keyboard focus once it mounts. */
+  const focusFloatingTextIdRef = useRef<string | null>(null);
   const [textBold, setTextBold] = useState(false);
   const [textItalic, setTextItalic] = useState(false);
   const [textUnderline, setTextUnderline] = useState(false);
@@ -515,7 +541,6 @@ export default function EditorPage() {
   const [findText, setFindText] = useState('');
   const [replaceText, setReplaceText] = useState('');
   const [caseSensitive, setCaseSensitive] = useState(false);
-  const [searchResults, setSearchResults] = useState<SearchMatch[]>([]);
   const [activeMatchIndex, setActiveMatchIndex] = useState<number>(0);
   const [searchBusy, setSearchBusy] = useState(false);
   const [showExportPanel, setShowExportPanel] = useState(false);
@@ -538,18 +563,33 @@ export default function EditorPage() {
   const [ltvStatus, setLtvStatus] = useState<LtvStatus | null>(null);
   const [managedSignatures, setManagedSignatures] = useState<ManagedSignature[]>([]);
   const [revisionEntries, setRevisionEntries] = useState<RevisionViewEntry[]>([]);
-  signaturesRef.current = signatures;
+
+  // Mirror overlay state into refs for event handlers and async callbacks.
+  // Runs after every commit (before paint, ahead of the passive effects), so
+  // handlers always see the committed values without writing refs during render.
+  useLayoutEffect(() => {
+    removedImagesRef.current = removedImages;
+    drawnPathsRef.current = drawnPaths;
+    floatingTextsRef.current = floatingTexts;
+    floatingImagesRef.current = floatingImages;
+    signaturesRef.current = signatures;
+  });
 
   const refreshSignatureLibrary = useCallback(() => {
     setSignatureLibraryEntries(orderLibraryByRecent(getSignatureLibrary().list()));
   }, []);
 
-  // Auto-close properties panel on mobile
-  useEffect(() => {
+  // Auto-close properties panel when the layout switches to mobile
+  const [panelLayoutIsMobile, setPanelLayoutIsMobile] = useState(isMobile);
+  if (panelLayoutIsMobile !== isMobile) {
+    setPanelLayoutIsMobile(isMobile);
     if (isMobile) setIsPanelOpen(false);
-  }, [isMobile]);
+  }
 
   useEffect(() => {
+    // The library lives in localStorage, which is only readable in the browser,
+    // so it is loaded after mount to keep the prerendered HTML hydration-safe.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshSignatureLibrary();
   }, [refreshSignatureLibrary]);
 
@@ -573,6 +613,7 @@ export default function EditorPage() {
       signatures?: VisualSignature[];
     },
     pageIndexOverride?: number,
+    batchId?: string,
   ) => {
     if (!doc || !engineRef.current) return;
     const pageIndex = pageIndexOverride ?? currentPage;
@@ -591,9 +632,68 @@ export default function EditorPage() {
       },
       label,
     );
+    if (batchId) entry.batchId = batchId;
     historyRef.current.push(entry);
     syncTxState();
   }, [doc, currentPage, syncTxState]);
+
+  /**
+   * History entries are per-page snapshots. Before changing a page other than
+   * the one the latest entry describes, record that page's current state so
+   * Undo can return to it.
+   */
+  const ensureHistoryBaseline = useCallback((pageIndex: number) => {
+    if (historyRef.current.peek()?.pageIndex === pageIndex) return;
+    pushEditorHistory('baseline', undefined, pageIndex);
+  }, [pushEditorHistory]);
+
+  /**
+   * Updates the placed images and keeps the ref in step. With a label the
+   * change is also recorded in the unified history (BE-308); drags record one
+   * entry on release via recordFloatingImages instead.
+   */
+  const updateFloatingImages = useCallback((
+    updater: (prev: FloatingImage[]) => FloatingImage[],
+    label?: string,
+  ) => {
+    const next = updater(floatingImagesRef.current);
+    floatingImagesRef.current = next;
+    setFloatingImages(next);
+    if (label) {
+      pushEditorHistory(label, { floatingImages: next });
+      setIsDirty(true);
+    }
+    return next;
+  }, [pushEditorHistory]);
+
+  const recordFloatingImages = useCallback((label: string) => {
+    pushEditorHistory(label, { floatingImages: floatingImagesRef.current });
+    setIsDirty(true);
+  }, [pushEditorHistory]);
+
+  const [selectedDrawingPage, setSelectedDrawingPage] = useState(currentPage);
+  if (selectedDrawingPage !== currentPage) {
+    setSelectedDrawingPage(currentPage);
+    setSelectedDrawing(null);
+  }
+
+  const handleDeleteSelectedDrawing = useCallback(() => {
+    if (!selectedDrawing || !doc || !engineRef.current) return;
+    if (selectedDrawing.kind === 'overlay') {
+      const next = drawnPathsRef.current.filter((p) => p.id !== selectedDrawing.id);
+      setDrawnPaths(next);
+      drawnPathsRef.current = next;
+      pushEditorHistory('delete-drawing', { drawnPaths: next });
+    } else {
+      const page = doc.pages[currentPage];
+      const [num, gen] = selectedDrawing.refKey.split('_').map(Number);
+      engineRef.current.removeAnnotationFromPage(page.dict, new PDFRef(num, gen), doc.objects);
+      pushEditorHistory('delete-drawing');
+      setRenderKey((k) => k + 1);
+    }
+    setSelectedDrawing(null);
+    setIsDirty(true);
+  }, [selectedDrawing, doc, currentPage, pushEditorHistory]);
 
   const pushSignatureSnapshot = useCallback((next: VisualSignature[], label: string) => {
     setSignatures(next);
@@ -632,8 +732,8 @@ export default function EditorPage() {
   }, []);
 
   const resolveEditStyleRange = useCallback((line: TextLine, start: number, end: number) => {
-    let s = Math.max(0, Math.min(start, line.text.length));
-    let e = Math.max(s, Math.min(end, line.text.length));
+    const s = Math.max(0, Math.min(start, line.text.length));
+    const e = Math.max(s, Math.min(end, line.text.length));
     // Collapsed caret is handled as typing-style (no existing-text restyle).
     if (e <= s) return { start: s, end: s };
     return { start: s, end: e };
@@ -652,9 +752,16 @@ export default function EditorPage() {
   const queueOrApplyStyle = useCallback((patch: Partial<TextStyleUI>) => {
     if (!selectedLine) return;
     if (editingLineRef.current) {
-      const sel = editSelRef.current;
+      let sel = editSelRef.current;
       const line = editAnchorLineRef.current ?? selectedLine;
-      // Collapsed caret → typing style only (Word-like). Do NOT restyle existing text.
+      // Alignment is a property of the whole line. Other styles also apply to
+      // the whole line while nothing is selected and nothing has been typed
+      // yet (the user clicked a line and pressed Bold); once they type, a
+      // collapsed caret sets the typing style instead, like a word processor.
+      const untouched = editTextRef.current === (initialRunTextRef.current || line.text);
+      if (sel.end <= sel.start && (patch.align != null || untouched)) {
+        sel = { start: 0, end: line.text.length };
+      }
       if (sel.end <= sel.start) {
         typingStyleRef.current = {
           ...typingStyleRef.current,
@@ -907,8 +1014,10 @@ export default function EditorPage() {
     }
 
     async function init() {
+      let openedBytes: Uint8Array | undefined;
       try {
         const stored = await loadPdfFromStorage();
+        if (stored) openedBytes = new Uint8Array(stored.bytes);
         if (!stored) { router.push('/'); return; }
         if (cancelled) return;
 
@@ -988,7 +1097,7 @@ export default function EditorPage() {
       } catch (e) {
         if (cancelled) return;
         console.error('[Editor] Init failed:', e);
-        setError(`Failed to parse PDF: ${e instanceof Error ? e.message : String(e)}`);
+        setError(friendlyPdfError(e, openedBytes));
         setIsLoading(false);
       }
     }
@@ -1055,21 +1164,35 @@ export default function EditorPage() {
     }
 
     generateThumbnails();
-    return () => { cancelled = true; };
+    return () => {
+      // A superseded run must not leave the spinner on (e.g. when a restored
+      // session swaps the document while thumbnails are still rendering).
+      cancelled = true;
+      setIsGeneratingThumbnails(false);
+    };
   }, [doc, thumbnailKey]);
 
-  // Reset edit state when doc or page changes
+  // Reset edit state when doc or page changes. Both change from many places
+  // (load, navigation, page operations), and the reset also clears refs
+  // (editingLineRef via setEditingLine, spatialIndexRef), which must not be
+  // written during render, so this stays an effect.
   useEffect(() => {
+    /* eslint-disable react-hooks/set-state-in-effect -- intentional reset on doc/page change, see above */
     setEditingLine(null);
     setSelectedLine(null);
     setEditText('');
     setSelectedDisplayItem(null);
     setDisplayItems([]);
+    setRedactionMarkCount(0);
+    /* eslint-enable react-hooks/set-state-in-effect */
     spatialIndexRef.current = null;
   }, [doc, currentPage, setEditingLine]);
 
-  // Sync text properties sidebar from selected line (use FontData BaseFont when available)
-  useEffect(() => {
+  // Sync text properties sidebar from selected line (use FontData BaseFont when available).
+  // Adjusted during render when the selection (or its fonts) changes, not in an effect.
+  const [styleSyncSource, setStyleSyncSource] = useState({ selectedLine, renderResult });
+  if (styleSyncSource.selectedLine !== selectedLine || styleSyncSource.renderResult !== renderResult) {
+    setStyleSyncSource({ selectedLine, renderResult });
     if (selectedLine && selectedLine.runs.length > 0) {
       const run = selectedLine.runs[0];
       // Keep fractional size so overlay matches canvas (rounding caused a visible jump)
@@ -1086,7 +1209,7 @@ export default function EditorPage() {
         setTextColor(hex);
       }
     }
-  }, [selectedLine, renderResult]);
+  }
 
   // ── Render current page ──
   useEffect(() => {
@@ -1242,7 +1365,7 @@ export default function EditorPage() {
       } catch (e) {
         if (cancelled) return;
         console.error('[Editor] Render failed:', e);
-        setError(`Render failed: ${e instanceof Error ? e.message : String(e)}`);
+        setError(actionErrorMessage('Couldn\'t display this page', e));
       }
       setIsRendering(false);
     }
@@ -1354,6 +1477,21 @@ export default function EditorPage() {
     if ((activeTool === 'select' || activeTool === 'text') && displayItems.length > 0 && !editingLine) {
       ctx.save();
       ctx.scale(dpr, dpr);
+      // Display items are in unrotated page space; turn the overlay the same
+      // way the renderer turns the page so boxes line up on /Rotate pages
+      // instead of streaking across them (BE-208).
+      const pageRotate = ((doc.pages[currentPage].rotate % 360) + 360) % 360;
+      const unrotatedHeight = pageRotate === 90 || pageRotate === 270 ? renderResult.pageWidth : renderResult.pageHeight;
+      if (pageRotate === 90) {
+        ctx.translate(renderResult.pageWidth * scale, 0);
+        ctx.rotate(Math.PI / 2);
+      } else if (pageRotate === 180) {
+        ctx.translate(renderResult.pageWidth * scale, renderResult.pageHeight * scale);
+        ctx.rotate(Math.PI);
+      } else if (pageRotate === 270) {
+        ctx.translate(0, renderResult.pageHeight * scale);
+        ctx.rotate(-Math.PI / 2);
+      }
 
       for (const item of displayItems) {
         const isImage = item.type === 'image';
@@ -1361,11 +1499,11 @@ export default function EditorPage() {
 
         const topLeft = pdfToCanvas(
           item.x, item.y + item.height,
-          scale, renderResult.pageHeight, mediaBox.x, mediaBox.y,
+          scale, unrotatedHeight, mediaBox.x, mediaBox.y,
         );
         const bottomRight = pdfToCanvas(
           item.x + item.width, item.y,
-          scale, renderResult.pageHeight, mediaBox.x, mediaBox.y,
+          scale, unrotatedHeight, mediaBox.x, mediaBox.y,
         );
 
         const boxX = topLeft.cssX;
@@ -1479,10 +1617,10 @@ export default function EditorPage() {
         const bw = Math.abs(bottomRight.cssX - topLeft.cssX);
         const bh = Math.abs(bottomRight.cssY - topLeft.cssY);
         const active = selectedLink?.ref.toKey() === link.ref.toKey();
-        ctx.strokeStyle = active ? '#52525b' : 'rgba(37, 99, 235, 0.85)';
-        ctx.lineWidth = active ? 2 : 1;
+        ctx.strokeStyle = active ? '#52525b' : 'rgba(37, 99, 235, 0.9)';
+        ctx.lineWidth = active ? 2 : 1.5;
         ctx.setLineDash(active ? [] : [4, 3]);
-        ctx.fillStyle = active ? 'rgba(63, 63, 70, 0.28)' : 'rgba(37, 99, 235, 0.06)';
+        ctx.fillStyle = active ? 'rgba(63, 63, 70, 0.28)' : 'rgba(37, 99, 235, 0.16)';
         // Rounded highlight for the active/hovered link
         const r = Math.min(6, bw / 2, bh / 2);
         ctx.beginPath();
@@ -1571,7 +1709,30 @@ export default function EditorPage() {
       }
       ctx.restore();
     }
-  }, [editingLine, editText, caretPos, renderResult, doc, currentPage, scale, drawnPaths, activeTool, displayItems, selectedDisplayItem, formFields, selectedFormField, editOffsetCss, editManualSize, editStyleOverrides, editSel, textFontSize, textUnderline, textColor, strokePaths, pageLinks, selectedLink, linksHighlighted, detectedTables, activeTableId]);
+
+    // ── Drawing picked with the Select tool (BE-307) ──
+    if (selectedDrawing && activeTool === 'select') {
+      let box: { x: number; y: number; width: number; height: number } | null = null;
+      if (selectedDrawing.kind === 'overlay') {
+        const path = drawnPaths.find((p) => p.id === selectedDrawing.id);
+        box = path ? drawnPathBounds(path) : null;
+      } else {
+        const r = selectedDrawing.rect;
+        const tl = pdfToCanvas(r.x, r.y + r.height, scale, renderResult.pageHeight, mediaBox.x, mediaBox.y);
+        const br = pdfToCanvas(r.x + r.width, r.y, scale, renderResult.pageHeight, mediaBox.x, mediaBox.y);
+        box = { x: tl.cssX, y: tl.cssY, width: br.cssX - tl.cssX, height: br.cssY - tl.cssY };
+      }
+      if (box) {
+        ctx.save();
+        ctx.scale(dpr, dpr);
+        ctx.strokeStyle = '#3b82f6';
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([5, 3]);
+        ctx.strokeRect(box.x - 3, box.y - 3, box.width + 6, box.height + 6);
+        ctx.restore();
+      }
+    }
+  }, [selectedDrawing, editingLine, editText, caretPos, renderResult, doc, currentPage, scale, drawnPaths, activeTool, displayItems, selectedDisplayItem, formFields, selectedFormField, editOffsetCss, editManualSize, editStyleOverrides, editSel, textFontSize, textUnderline, textColor, strokePaths, pageLinks, selectedLink, linksHighlighted, detectedTables, activeTableId]);
 
   // Re-draw overlay whenever edit state changes
   useEffect(() => { drawOverlay(); }, [drawOverlay]);
@@ -1616,7 +1777,7 @@ export default function EditorPage() {
   // ── Begin an edit session with frozen line anchor + undo snapshot ──
   const beginEditSession = useCallback((line: TextLine, caretAt?: number) => {
     initialRunTextRef.current = line.text;
-    editAnchorLineRef.current = {
+    setEditAnchorLine({
       ...line,
       runs: line.runs.map(r => ({
         ...r,
@@ -1626,7 +1787,7 @@ export default function EditorPage() {
           : undefined,
       })),
       segments: line.segments.map(s => ({ ...s, run: s.run })),
-    };
+    });
     editingBlockIdRef.current = line.id;
     pendingStylesRef.current = [];
     typingStyleRef.current = {};
@@ -1703,7 +1864,7 @@ export default function EditorPage() {
     const hasPendingStyles = pendingStyles.length > 0;
 
     if (!textChanged && !moved && !hasPendingStyles) {
-      editAnchorLineRef.current = null;
+      setEditAnchorLine(null);
       undoSnapshotRef.current = null;
       editingBlockIdRef.current = null;
       pendingStylesRef.current = [];
@@ -1737,8 +1898,8 @@ export default function EditorPage() {
         }));
 
       if (textChanged) {
-        let commitText = editTextRef.current || editText;
-        let caretAfter = editSelRef.current.end;
+        const commitText = editTextRef.current || editText;
+        const caretAfter = editSelRef.current.end;
         // Do NOT collapse multi-spaces on commit — live overlay gaps were real
         // inserts, and smashing them made spaces vanish on click-away.
         const editResult = engine.applyLineTextEdit(
@@ -1756,6 +1917,12 @@ export default function EditorPage() {
           },
         );
 
+        // The document's fonts can't carry colour emoji, and the fallback
+        // font has none either, so say so instead of dropping them silently.
+        const originalText = initialRunTextRef.current || targetLine.text;
+        if (engine.hasEmoji(commitText) && engine.countEmoji(commitText) > engine.countEmoji(originalText)) {
+          setError('Emoji can\'t be embedded in this PDF\'s fonts, so they won\'t appear in the downloaded file.');
+        }
         if (editResult.needsFontAugmentation) {
           try {
             const missing = String.fromCharCode(
@@ -1899,7 +2066,7 @@ export default function EditorPage() {
           (commitText.match(/\s/g) || []).length - (oldTextForPack.match(/\s/g) || []).length;
         if (packDeltaSpaces <= 0) {
           try {
-            let packBytes = engine.getPageContentBytes(page, doc.objects);
+            const packBytes = engine.getPageContentBytes(page, doc.objects);
             const interpreted = engine.interpretPage(packBytes, page, doc.objects);
             const flow = engine.buildDocumentFlow(interpreted.textRuns);
             const normalizeDashes = (t: string) => t.replace(/[\u2013\u2014\u2212]/g, '-');
@@ -1926,7 +2093,7 @@ export default function EditorPage() {
 
 
       pushEditorHistory('text-edit');
-      editAnchorLineRef.current = null;
+      setEditAnchorLine(null);
       undoSnapshotRef.current = null;
       editingBlockIdRef.current = null;
       pendingStylesRef.current = [];
@@ -1942,7 +2109,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Edit failed:', e);
-      setError(`Edit failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t save that edit', e));
     } finally {
       setIsSaving(false);
     }
@@ -1954,7 +2121,7 @@ export default function EditorPage() {
       clearTimeout(blurTimeoutRef.current);
       blurTimeoutRef.current = null;
     }
-    editAnchorLineRef.current = null;
+    setEditAnchorLine(null);
     undoSnapshotRef.current = null;
     editingBlockIdRef.current = null;
     pendingStylesRef.current = [];
@@ -1971,10 +2138,10 @@ export default function EditorPage() {
   // ── Undo ──
   const handleUndo = useCallback(async () => {
     if (!doc || !engineRef.current) return;
-    const entry = historyRef.current.undo();
-    if (!entry) return;
+    const entries = historyRef.current.undoStep();
+    if (!entries) return;
     try {
-      await applyHistoryEntry(entry);
+      for (const entry of entries) await applyHistoryEntry(entry);
     } catch (e) {
       console.error('[Editor] Undo failed:', e);
     }
@@ -1982,10 +2149,10 @@ export default function EditorPage() {
 
   const handleRedo = useCallback(async () => {
     if (!doc || !engineRef.current) return;
-    const entry = historyRef.current.redo();
-    if (!entry) return;
+    const entries = historyRef.current.redoStep();
+    if (!entries) return;
     try {
-      await applyHistoryEntry(entry);
+      for (const entry of entries) await applyHistoryEntry(entry);
     } catch (e) {
       console.error('[Editor] Redo failed:', e);
     }
@@ -2048,7 +2215,7 @@ export default function EditorPage() {
       setRenderKey((k) => k + 1);
     } catch (err) {
       console.error('[Editor] Place signature in field failed:', err);
-      setError(`Place signature failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t place the signature', err));
     }
   }, [doc, activeLibraryId, currentPage, pushSignatureSnapshot]);
 
@@ -2068,6 +2235,10 @@ export default function EditorPage() {
     setSelectedCertificateId(id);
   }, []);
 
+  // The PDF document model is a mutable engine object: engine edits update it in
+  // place and a re-render is requested through renderKey. Signing follows the
+  // same contract (doc.rawBytes becomes the signed file), hence the exception.
+  // eslint-disable-next-line react-hooks/immutability
   const handleCryptographicSign = useCallback(async () => {
     if (!doc) {
       setError('No document loaded.');
@@ -2090,11 +2261,15 @@ export default function EditorPage() {
         field = unsigned;
       } else {
         const placedSig = signaturesRef.current.find((s) => s.pageIndex === currentPage) ?? signaturesRef.current[0];
-        const px = placedSig ? placedSig.x : 100;
-        const py = placedSig ? placedSig.y : 100;
+        // createSignatureFieldAtPoint centres the field on the point, and a
+        // placed signature's x/y is its bottom-left corner, so pass its centre
+        // and size to make the field cover the image exactly (BE-511).
+        const px = placedSig ? placedSig.x + placedSig.width / 2 : 100;
+        const py = placedSig ? placedSig.y + placedSig.height / 2 : 100;
         try {
           const created = createSignatureFieldAtPoint(doc, currentPage, px, py, {
             withPlaceholderAppearance: true,
+            ...(placedSig ? { width: placedSig.width, height: placedSig.height } : {}),
           });
           const fieldsOnPage = detectSignatureFieldsOnPage(doc, currentPage);
           setPdfSignatureFields(fieldsOnPage);
@@ -2127,6 +2302,7 @@ export default function EditorPage() {
         appearanceText: identity?.leaf?.subject.commonName ?? identity?.label ?? 'Signed',
         enableTimestamp,
       });
+      // eslint-disable-next-line react-hooks/immutability -- see note above handleCryptographicSign
       doc.rawBytes = result.bytes;
       setPdfSignatureFields(detectSignatureFieldsOnPage(doc, currentPage));
       pushSignatureSnapshot(
@@ -2145,7 +2321,7 @@ export default function EditorPage() {
       }
     } catch (err) {
       console.error('[Editor] Cryptographic sign failed:', err);
-      setError(`Digital sign failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t sign the document', err));
     } finally {
       setCryptoSignBusy(false);
     }
@@ -2163,9 +2339,30 @@ export default function EditorPage() {
     setLtvStatus(getLtvStatus(doc));
   }, [doc]);
 
-  useEffect(() => {
+  // Refresh the multi-signature panel when the document or its signature
+  // fields change (adjusted during render rather than in an effect).
+  const [multiSigSource, setMultiSigSource] = useState({ doc, pdfSignatureFields });
+  if (multiSigSource.doc !== doc || multiSigSource.pdfSignatureFields !== pdfSignatureFields) {
+    setMultiSigSource({ doc, pdfSignatureFields });
     refreshMultiSigPanel();
-  }, [refreshMultiSigPanel, pdfSignatureFields]);
+  }
+
+  // Keep the signature summary current: re-check after opening or signing,
+  // instead of showing stale counts until Validate is clicked (BE-512).
+  useEffect(() => {
+    if (!doc || pdfSignatureFields.length === 0) return;
+    let cancelled = false;
+    validateDocumentSignatures(doc, { allowSelfSigned: true })
+      .then((report) => {
+        if (!cancelled) setValidationReport(report);
+      })
+      .catch(() => {
+        /* the Validate button reports errors */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [doc, pdfSignatureFields]);
 
   const handleValidateSignatures = useCallback(async () => {
     if (!doc) return;
@@ -2175,7 +2372,7 @@ export default function EditorPage() {
       setValidationReport(report);
       refreshMultiSigPanel();
     } catch (err) {
-      setError(`Validation failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t check the signatures', err));
     } finally {
       setValidationBusy(false);
     }
@@ -2192,7 +2389,7 @@ export default function EditorPage() {
       signedPristineRef.current = wasPristine;
       refreshMultiSigPanel();
     } catch (err) {
-      setError(`LTV failed: ${err instanceof Error ? err.message : String(err)}`);
+      setError(actionErrorMessage('Couldn\'t add long-term validation', err));
     }
   }, [doc, refreshMultiSigPanel]);
 
@@ -2200,6 +2397,7 @@ export default function EditorPage() {
     setFormFieldDraft(value);
     if (!doc || !selectedFormField || !engineRef.current) return;
     const engine = engineRef.current;
+    if (selectedFormField.readOnly) return;
     if (selectedFormField.fieldType === 'Btn') {
       const checked = value === 'true' || value === 'Yes' || value === 'On';
       engine.setButtonFieldValue(doc, selectedFormField, checked);
@@ -2219,29 +2417,26 @@ export default function EditorPage() {
         f.ref.toKey() === selectedFormField.ref.toKey() ? { ...f, value } : f,
       ));
     }
-    setIsDirty(true);
-  }, [doc, selectedFormField]);
+    // Redraw so the regenerated appearance (and radio siblings) show on the canvas.
+    bumpRender();
+  }, [doc, selectedFormField, bumpRender]);
 
-  // ── Document-wide search effect ──
-  useEffect(() => {
-    if (!doc || !engineRef.current || !findText.trim()) {
-      setSearchResults([]);
-      setActiveMatchIndex(0);
-      return;
-    }
+  // ── Document-wide search ──
+  // Derived from the document during render. Content edits mutate `doc` in
+  // place, so `renderKey` (bumped on every edit) is what invalidates the scan.
+  const searchResults = useMemo<SearchMatch[]>(() => {
+    void renderKey;
+    if (!doc || !findText.trim()) return [];
 
-    let cancelled = false;
     const query = findText.trim();
     const lowerQuery = caseSensitive ? query : query.toLowerCase();
-    const engine = engineRef.current;
     const matches: SearchMatch[] = [];
 
     for (let p = 0; p < doc.pages.length; p++) {
-      if (cancelled) return;
       const page = doc.pages[p];
       try {
-        const bytes = engine.getPageContentBytes(page, doc.objects);
-        const interpreted = engine.interpretPage(bytes, page, doc.objects);
+        const bytes = getPageContentBytes(page, doc.objects);
+        const interpreted = interpretPage(bytes, page, doc.objects);
 
         for (const run of interpreted.textRuns) {
           const text = run.text;
@@ -2284,25 +2479,18 @@ export default function EditorPage() {
       }
     }
 
-    if (!cancelled) {
-      setSearchResults(matches);
-      if (matches.length > 0) {
-        setActiveMatchIndex(prev => {
-          const nextIdx = prev >= 0 && prev < matches.length ? prev : 0;
-          if (matches[nextIdx].pageIndex !== currentPage) {
-            setCurrentPage(matches[nextIdx].pageIndex);
-          }
-          return nextIdx;
-        });
-      } else {
-        setActiveMatchIndex(0);
-      }
-    }
+    return matches;
+  }, [findText, caseSensitive, doc, renderKey]);
 
-    return () => {
-      cancelled = true;
-    };
-  }, [findText, caseSensitive, doc, renderKey, currentPage]);
+  // When the results change, keep the active match in range and bring its page into view.
+  const [seenSearchResults, setSeenSearchResults] = useState(searchResults);
+  if (seenSearchResults !== searchResults) {
+    setSeenSearchResults(searchResults);
+    const nextIdx = activeMatchIndex >= 0 && activeMatchIndex < searchResults.length ? activeMatchIndex : 0;
+    if (nextIdx !== activeMatchIndex) setActiveMatchIndex(nextIdx);
+    const target = searchResults[nextIdx];
+    if (target && target.pageIndex !== currentPage) setCurrentPage(target.pageIndex);
+  }
 
   const handleNextMatch = useCallback(() => {
     if (searchResults.length === 0) return;
@@ -2340,7 +2528,9 @@ export default function EditorPage() {
         .filter((m) => m.pageIndex === currentMatch.pageIndex).length;
       const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive, occurrence);
       if (result.newContentBytes && result.newContentBytes !== bytes) {
+        ensureHistoryBaseline(currentMatch.pageIndex);
         await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
+        pushEditorHistory('replace', undefined, currentMatch.pageIndex);
         setIsDirty(true);
         setRenderKey(k => k + 1);
       }
@@ -2349,23 +2539,33 @@ export default function EditorPage() {
     } finally {
       setSearchBusy(false);
     }
-  }, [doc, searchResults, activeMatchIndex, findText, replaceText, caseSensitive]);
+  }, [doc, searchResults, activeMatchIndex, findText, replaceText, caseSensitive, ensureHistoryBaseline, pushEditorHistory]);
 
   const handleReplaceAll = useCallback(async () => {
     if (!doc || !engineRef.current || !findText.trim()) return;
     setSearchBusy(true);
     try {
       const engine = engineRef.current;
-      let replacedCount = 0;
+      // Work out every page's replacement first, then record the batch so a
+      // single Undo reverts all pages at once (BE-203).
+      const changes: { pageIndex: number; bytes: Uint8Array }[] = [];
       for (let p = 0; p < doc.pages.length; p++) {
         const page = doc.pages[p];
         const bytes = engine.getPageContentBytes(page, doc.objects);
         const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive);
-        if (result.newContentBytes) {
-          await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
-          replacedCount++;
+        if (result.newContentBytes && result.newContentBytes !== bytes) {
+          changes.push({ pageIndex: p, bytes: result.newContentBytes });
         }
       }
+      for (const { pageIndex } of changes) {
+        if (!historyRef.current.hasPage(pageIndex)) pushEditorHistory('baseline', undefined, pageIndex);
+      }
+      const batchId = `replace-all-${Date.now()}`;
+      for (const { pageIndex, bytes } of changes) {
+        await engine.updatePageContent(doc.pages[pageIndex].contentRefs, bytes, doc.objects);
+        pushEditorHistory('replace-all', undefined, pageIndex, batchId);
+      }
+      const replacedCount = changes.length;
       if (replacedCount > 0) {
         setIsDirty(true);
         setRenderKey(k => k + 1);
@@ -2375,7 +2575,7 @@ export default function EditorPage() {
     } finally {
       setSearchBusy(false);
     }
-  }, [doc, findText, replaceText, caseSensitive]);
+  }, [doc, findText, replaceText, caseSensitive, pushEditorHistory]);
 
   const handleRecognizeText = useCallback(async () => {
     if (!doc || !engineRef.current || !pdfCanvasRef.current) return;
@@ -2401,7 +2601,7 @@ export default function EditorPage() {
         setError('OCR found no text on this page. Try a clearer scan or higher zoom.');
       }
     } catch (e) {
-      setError(`OCR failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t recognize text on this page', e));
     } finally {
       setIsSaving(false);
     }
@@ -2420,17 +2620,23 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Flatten forms failed:', e);
-      setError(`Flatten failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t flatten the form', e));
     } finally {
       setIsSaving(false);
     }
   }, [doc, currentPage, formFields, pushEditorHistory]);
 
-  const handleDuplicateLineBelow = useCallback(async () => {
-    const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
-    if (!doc || !engineRef.current || !line) return;
+  /**
+   * Set when Shift+Enter is pressed mid-edit: the edit is committed first, and
+   * the duplicate is made from the re-extracted line once the page re-renders.
+   * The anchor's instruction indices point at the pre-edit content, so
+   * duplicating it directly copied the original text over the edited line.
+   */
+  const pendingDuplicateRef = useRef<{ baseline: number; x: number } | null>(null);
+
+  const duplicateLine = useCallback(async (line: TextLine) => {
+    if (!doc || !engineRef.current) return;
     try {
-      if (editingLine) await handleEditSubmit(false);
       setIsSaving(true);
       const engine = engineRef.current;
       const page = doc.pages[currentPage];
@@ -2442,11 +2648,33 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Duplicate line failed:', e);
-      setError(`Duplicate line failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t duplicate the line', e));
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, selectedLine, editingLine, handleEditSubmit, pushEditorHistory]);
+  }, [doc, currentPage, pushEditorHistory]);
+
+  const handleDuplicateLineBelow = useCallback(async () => {
+    const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
+    if (!doc || !engineRef.current || !line) return;
+    if (editingLine) {
+      pendingDuplicateRef.current = { baseline: line.baseline, x: line.x };
+      await handleEditSubmit(false);
+      return;
+    }
+    await duplicateLine(line);
+  }, [doc, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
+
+  // Finish a Shift+Enter duplicate once the committed edit has re-rendered.
+  useEffect(() => {
+    const pending = pendingDuplicateRef.current;
+    if (!pending || !renderResult || editingLine) return;
+    pendingDuplicateRef.current = null;
+    const fresh = renderResult.textLines.find(l =>
+      Math.abs(l.baseline - pending.baseline) < 2 && Math.abs(l.x - pending.x) < 4,
+    );
+    if (fresh) void duplicateLine(fresh);
+  }, [renderResult, editingLine, duplicateLine]);
 
   // Resolve table cell for the current selection (for sidebar actions)
   const selectedTableCell = (() => {
@@ -2474,18 +2702,25 @@ export default function EditorPage() {
       const rowLines = engineRef.current.getTableRowLines(table, cell.row);
       const page = doc.pages[currentPage];
       const bytes = engineRef.current.getPageContentBytes(page, doc.objects);
-      const next = engineRef.current.duplicateTableRowBelow(bytes, rowLines);
+      // Everything below the row moves down, like inserting a row in a word
+      // processor, so the new row doesn't overlap the next one.
+      const rowBaseline = Math.min(...rowLines.map(l => l.baseline));
+      const linesBelow = (renderResult?.textLines ?? []).filter(l => l.baseline < rowBaseline - 1);
+      const pitch = table.rowBaselines.length > 1
+        ? Math.abs(table.rowBaselines[0] - table.rowBaselines[table.rowBaselines.length - 1]) / (table.rowBaselines.length - 1)
+        : undefined;
+      const next = engineRef.current.duplicateTableRowBelow(bytes, rowLines, linesBelow, pitch);
       await engineRef.current.updatePageContent(page.contentRefs, next, doc.objects);
       pushEditorHistory('table-add-row');
       setIsDirty(true);
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Add table row failed:', e);
-      setError(`Add row failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t add a row', e));
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, selectedTableCell, editingLine, handleEditSubmit, pushEditorHistory]);
+  }, [doc, currentPage, selectedTableCell, editingLine, handleEditSubmit, pushEditorHistory, renderResult]);
 
   const handleAddTableColumn = useCallback(async () => {
     if (!doc || !engineRef.current || !selectedTableCell) return;
@@ -2506,7 +2741,7 @@ export default function EditorPage() {
       setRenderKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Add table column failed:', e);
-      setError(`Add column failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t add a column', e));
     } finally {
       setIsSaving(false);
     }
@@ -2582,6 +2817,23 @@ export default function EditorPage() {
           return;
         }
       }
+
+      // Select tool: pick a drawing (unsaved stroke first, then saved markup)
+      if (activeTool === 'select' && engineRef.current) {
+        const pathHit = hitTestDrawnPath(drawnPathsRef.current, cssX, cssY);
+        const annotHit = pathHit ? null : engineRef.current.hitTestMarkupAnnotation(page.dict, doc.objects, pdfX, pdfY, 4 / scale);
+        if (pathHit || annotHit) {
+          if (editingLine) void handleEditSubmit(false);
+          setSelectedDrawing(pathHit
+            ? { kind: 'overlay', id: pathHit.id }
+            : { kind: 'annot', refKey: annotHit!.ref.toKey(), rect: annotHit!.rect });
+          setSelectedDisplayItem(null);
+          setSelectedLine(null);
+          setActiveFloatingImageId(null);
+          return;
+        }
+      }
+      setSelectedDrawing(null);
 
       // Click a form field box → select it for editing
       if (formFields.length > 0 && engineRef.current) {
@@ -2696,6 +2948,24 @@ export default function EditorPage() {
         setActiveFloatingImageId(null);
         setSelectedSignatureId(null);
       }
+    } else if (activeTool === 'redact') {
+      const hit = hitTestTextLine(pdfX, pdfY, renderResult.textLines);
+      if (hit && engineRef.current) {
+        const b = getLineBounds(hit);
+        try {
+          ensureHistoryBaseline(currentPage);
+          engineRef.current.markRedaction(doc, currentPage, [
+            b.x, b.y + b.height, b.x + b.width, b.y + b.height,
+            b.x, b.y, b.x + b.width, b.y,
+          ]);
+          pushEditorHistory('redact-mark');
+          setRedactionMarkCount(n => n + 1);
+          setIsDirty(true);
+          setRenderKey(k => k + 1);
+        } catch (err) {
+          console.warn('[Editor] Mark redaction failed:', err);
+        }
+      }
     } else if (activeTool === 'addtext') {
       if (blurTimeoutRef.current) {
         clearTimeout(blurTimeoutRef.current);
@@ -2705,18 +2975,29 @@ export default function EditorPage() {
       if (!doc || !renderResult) return;
       const page = doc.pages[currentPage];
 
+      // A new box always starts from the default style, not whatever was last
+      // used on another line; the sidebar is reset to match it.
       const newBox: FloatingText = {
-        id: Math.random().toString(36).substr(2, 9),
+        id: Math.random().toString(36).slice(2, 11),
         pdfX,
         pdfY,
-        text: 'New Text',
-        fontSize: textFontSize,
-        fontFamily: textFontFamily,
-        color: textColor,
+        text: 'New text',
+        fontSize: DEFAULT_TEXT_STYLE.fontSize,
+        fontFamily: DEFAULT_TEXT_STYLE.fontFamily,
+        color: DEFAULT_TEXT_STYLE.color,
       };
+      setTextFontSize(DEFAULT_TEXT_STYLE.fontSize);
+      setTextFontFamily(DEFAULT_TEXT_STYLE.fontFamily);
+      setTextColor(DEFAULT_TEXT_STYLE.color);
+      setTextBold(false);
+      setTextItalic(false);
+      setTextUnderline(false);
+      setTextAlign('left');
 
+      focusFloatingTextIdRef.current = newBox.id;
       setFloatingTexts(prev => [...prev, newBox]);
       setActiveFloatingTextId(newBox.id);
+      setIsDirty(true);
       setActiveTool('text');
 
     } else if (activeTool === 'highlight') {
@@ -2891,9 +3172,8 @@ export default function EditorPage() {
             dataUrl: jpegDataUrl,
             rotation: 0,
           };
-          setFloatingImages(prev => [...prev, newImg]);
+          updateFloatingImages(prev => [...prev, newImg], 'add-image');
           setActiveFloatingImageId(newImg.id);
-          setIsDirty(true);
         };
         img.src = dataUrl;
       };
@@ -2946,14 +3226,14 @@ export default function EditorPage() {
     setSelectedSignatureId(sig.id);
     setActiveLibraryId(entry.id);
     pushRecentSignatureId(entry.id);
-  }, [doc, renderResult, currentPage, scale, pushSignatureSnapshot]);
+  }, [doc, renderResult, currentPage, scale, pushSignatureSnapshot, updateFloatingImages]);
 
   const applyEraser = useCallback((x: number, y: number, opts?: { deferAnnotRender?: boolean }) => {
     const eraserRadius = eraserSize / 2;
 
     // 1) Erase ephemeral overlay strokes / shapes
     setDrawnPaths(prev => {
-      let newPaths: DrawnPath[] = [];
+      const newPaths: DrawnPath[] = [];
       let modified = false;
       for (const path of prev) {
         const kind = path.kind ?? 'freehand';
@@ -3168,20 +3448,17 @@ export default function EditorPage() {
 
         if (!annotation) continue;
 
-        const { dict, appearanceStream } = engine.createAnnotationDict(annotation, currentObjNum++);
-        if (appearanceStream) {
-          doc.objects.set(`${currentObjNum}_0`, appearanceStream as import('@/engine').PDFObject);
-          currentObjNum++;
-        }
+        // addAnnotationToPage stores the appearance stream as its own object.
+        const { dict } = engine.createAnnotationDict(annotation, currentObjNum++);
 
         const annotRef = new engine.PDFRef(currentObjNum, 0);
         engine.addAnnotationToPage(page.dict, dict, annotRef, doc.objects);
-        currentObjNum++;
+        currentObjNum = engine.getNextObjNum(doc);
       }
 
       if (fTexts.length > 0 || fImages.length > 0) {
-        let contentBytes = engine.getPageContentBytes(page, doc.objects);
-        let newContentBytes: any = new Uint8Array(contentBytes);
+        const contentBytes = engine.getPageContentBytes(page, doc.objects);
+        let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
 
         for (const ft of fTexts) {
           if (!ft.text.trim()) continue;
@@ -3253,7 +3530,7 @@ export default function EditorPage() {
       newObjects.set(k, v);
     }
     const newPages: PDFPageInfo[] = targetDoc.pages.map((p) => {
-      const pageDict = new (engine as any).PDFDict();
+      const pageDict = new engine.PDFDict();
       for (const [k, v] of p.dict.entries()) {
         pageDict.set(k, v);
       }
@@ -3264,7 +3541,7 @@ export default function EditorPage() {
         ...p,
         dict: pageDict,
         contentRefs: [...p.contentRefs],
-        resources: p.resources ? p.resources : new (engine as any).PDFDict(),
+        resources: p.resources ? p.resources : new engine.PDFDict(),
       };
     });
 
@@ -3390,21 +3667,18 @@ export default function EditorPage() {
       }
 
       if (annotation) {
-        const { dict, appearanceStream } = engine.createAnnotationDict(annotation, currentObjNum++);
-        if (appearanceStream) {
-          exportDoc.objects.set(`${currentObjNum}_0`, appearanceStream as import('@/engine').PDFObject);
-          currentObjNum++;
-        }
+        // addAnnotationToPage stores the appearance stream as its own object.
+        const { dict } = engine.createAnnotationDict(annotation, currentObjNum++);
         const annotRef = new engine.PDFRef(currentObjNum, 0);
         engine.addAnnotationToPage(page.dict, dict, annotRef, exportDoc.objects);
-        currentObjNum++;
+        currentObjNum = engine.getNextObjNum(exportDoc);
       }
     }
 
     if (texts.length > 0 || images.length > 0) {
       isolateResources(page);
-      let contentBytes = engine.getPageContentBytes(page, exportDoc.objects);
-      let newContentBytes: any = new Uint8Array(contentBytes);
+      const contentBytes = engine.getPageContentBytes(page, exportDoc.objects);
+      let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
 
       for (const ft of texts) {
         if (!ft.text.trim()) continue;
@@ -3781,6 +4055,56 @@ export default function EditorPage() {
     linkPopoverHoverRef.current = false;
   }, []);
 
+  const scanPageLinks = useCallback(() => {
+    if (!doc || !engineRef.current) return;
+    try {
+      setPageLinks(engineRef.current.listPageLinks(doc, currentPage));
+      setLinksHighlighted(true);
+      setLinkCreatePending(false);
+      closeLinkPopover();
+    } catch (err) {
+      console.warn('[Editor] Scan links failed:', err);
+    }
+  }, [doc, currentPage, closeLinkPopover]);
+
+  /**
+   * Toolbar selection. Link is not a separate canvas mode: it opens Edit Text
+   * with the page's links highlighted, where links are added and edited.
+   */
+  const selectTool = useCallback((tool: EditorTool) => {
+    if (tool === 'link') {
+      setActiveTool('text');
+      setIsPanelOpen(true);
+      scanPageLinks();
+      return;
+    }
+    setActiveTool(tool);
+  }, [scanPageLinks]);
+
+  const handleApplyRedactions = useCallback(async () => {
+    if (!doc || !engineRef.current) return;
+    const okRedact = await confirmDialog({
+      title: 'Apply redactions?',
+      description: 'The marked content on this page will be permanently removed. This can\'t be undone once you download the PDF.',
+      confirmLabel: 'Apply redactions',
+      destructive: true,
+    });
+    if (!okRedact) return;
+    try {
+      setIsSaving(true);
+      ensureHistoryBaseline(currentPage);
+      await engineRef.current.applyRedactions(doc, currentPage);
+      pushEditorHistory('apply-redactions');
+      setRedactionMarkCount(0);
+      setIsDirty(true);
+      setRenderKey(k => k + 1);
+    } catch (err) {
+      setError(actionErrorMessage('Couldn\'t apply redactions', err));
+    } finally {
+      setIsSaving(false);
+    }
+  }, [doc, currentPage, ensureHistoryBaseline, pushEditorHistory, setIsDirty]);
+
   const saveLinkFromPopover = useCallback(async (andClose = true) => {
     if (!doc || !engineRef.current || !selectedLink) {
       if (andClose) closeLinkPopover();
@@ -3893,6 +4217,7 @@ export default function EditorPage() {
       startPdfX: box.pdfX,
       startPdfY: box.pdfY
     };
+    let moved = false;
 
     const handleMove = (me: PointerEvent) => {
       if (!dragInfo.current || !doc || !renderResult) return;
@@ -3903,7 +4228,8 @@ export default function EditorPage() {
 
       const { startPdfX, startPdfY } = dragInfo.current;
 
-      setFloatingImages(prev => prev.map(p => p.id === id ? {
+      moved = true;
+      updateFloatingImages(prev => prev.map(p => p.id === id ? {
         ...p,
         pdfX: startPdfX + pdfDx,
         pdfY: startPdfY + pdfDy,
@@ -3912,13 +4238,14 @@ export default function EditorPage() {
 
     const handleUp = () => {
       dragInfo.current = null;
+      if (moved) recordFloatingImages('move-image');
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }, [floatingImages, scale, doc, renderResult]);
+  }, [floatingImages, scale, doc, renderResult, updateFloatingImages, recordFloatingImages]);
 
   const handleFloatingImageRotateDown = useCallback((e: React.PointerEvent, id: string) => {
     e.preventDefault();
@@ -3934,6 +4261,7 @@ export default function EditorPage() {
     const fi = floatingImagesRef.current.find(f => f.id === id);
     const initialRot = fi?.rotation || 0;
     const startAngle = Math.atan2(e.clientY - centerY, e.clientX - centerX) * (180 / Math.PI);
+    let rotated = false;
 
     const onPointerMove = (ev: PointerEvent) => {
       const currentAngle = Math.atan2(ev.clientY - centerY, ev.clientX - centerX) * (180 / Math.PI);
@@ -3943,18 +4271,19 @@ export default function EditorPage() {
       if (ev.shiftKey) {
         newRot = Math.round(newRot / 15) * 15;
       }
-      setFloatingImages(prev => prev.map(p => p.id === id ? { ...p, rotation: newRot } : p));
-      setIsDirty(true);
+      rotated = true;
+      updateFloatingImages(prev => prev.map(p => p.id === id ? { ...p, rotation: newRot } : p));
     };
 
     const onPointerUp = () => {
+      if (rotated) recordFloatingImages('rotate-image');
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
 
     window.addEventListener('pointermove', onPointerMove);
     window.addEventListener('pointerup', onPointerUp);
-  }, []);
+  }, [updateFloatingImages, recordFloatingImages]);
 
   const handleImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -3987,13 +4316,14 @@ export default function EditorPage() {
             setRenderKey(k => k + 1);
           } catch (err) {
             console.error('[Editor] Replace embedded image failed:', err);
-            setError(`Replace failed: ${err instanceof Error ? err.message : String(err)}`);
+            setError(actionErrorMessage('Couldn\'t replace the text', err));
           }
           return;
         }
 
         if (replacingImageIdRef.current) {
-          setFloatingImages(prev => prev.map(p => p.id === replacingImageIdRef.current ? { ...p, dataUrl: jpegDataUrl } : p));
+          const replacingId = replacingImageIdRef.current;
+          updateFloatingImages(prev => prev.map(p => p.id === replacingId ? { ...p, dataUrl: jpegDataUrl } : p), 'replace-image');
           replacingImageIdRef.current = null;
           return;
         }
@@ -4023,14 +4353,14 @@ export default function EditorPage() {
           pdfHeight,
           dataUrl: jpegDataUrl,
         };
-        setFloatingImages(prev => [...prev, newImg]);
+        updateFloatingImages(prev => [...prev, newImg], 'add-image');
         setActiveFloatingImageId(newImg.id);
       };
       img.src = dataUrl;
     };
     reader.readAsDataURL(file);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, [doc, currentPage, renderResult, pushEditorHistory]);
+  }, [doc, currentPage, renderResult, pushEditorHistory, updateFloatingImages]);
 
   const toEditableImage = useCallback((item: ImageItem): EditableObject => ({
     id: `sel-image-${item.name}`,
@@ -4107,13 +4437,12 @@ export default function EditorPage() {
         dataUrl,
       };
 
-      setFloatingImages(prev => [...prev, newImg]);
+      updateFloatingImages(prev => [...prev, newImg], 'copy-image');
       setActiveFloatingImageId(newImg.id);
-      setIsDirty(true);
     } catch (e) {
       console.error('[Editor] Copy image failed:', e);
     }
-  }, [doc, currentPage, selectedDisplayItem]);
+  }, [doc, currentPage, selectedDisplayItem, updateFloatingImages]);
 
   // ── Hidden / line input — preview only; PDF commits on submit ──
   const handleHiddenInput = useCallback((e: React.FormEvent<HTMLTextAreaElement | HTMLInputElement>) => {
@@ -4383,9 +4712,29 @@ export default function EditorPage() {
     const viewport = scrollViewportRef.current;
     if (!viewport) return;
 
+    let lastPageFlip = 0;
     const onWheel = (e: WheelEvent) => {
-      // Pinch-to-zoom on macOS/Chrome sets ctrlKey; also support Ctrl/Cmd+wheel
-      if (!(e.ctrlKey || e.metaKey)) return;
+      // Plain wheel at the top or bottom edge of a page moves to the
+      // neighbouring page (one page is shown at a time), throttled so one
+      // flick doesn't skip several pages.
+      if (!(e.ctrlKey || e.metaKey)) {
+        const now = Date.now();
+        if (now - lastPageFlip < 450 || Math.abs(e.deltaY) < 4) return;
+        const atBottom = viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 2;
+        const atTop = viewport.scrollTop <= 1;
+        if (e.deltaY > 0 && atBottom && currentPage < totalPages - 1) {
+          lastPageFlip = now;
+          e.preventDefault();
+          void goToNext().then(() => { viewport.scrollTop = 0; });
+        } else if (e.deltaY < 0 && atTop && currentPage > 0) {
+          lastPageFlip = now;
+          e.preventDefault();
+          void goToPrev().then(() => {
+            requestAnimationFrame(() => { viewport.scrollTop = viewport.scrollHeight; });
+          });
+        }
+        return;
+      }
       e.preventDefault();
       e.stopPropagation();
 
@@ -4400,7 +4749,7 @@ export default function EditorPage() {
 
     viewport.addEventListener('wheel', onWheel, { passive: false });
     return () => viewport.removeEventListener('wheel', onWheel);
-  }, [doc, isLoading, currentPage]);
+  }, [doc, isLoading, currentPage, totalPages, goToNext, goToPrev]);
   // ── Watermark Handlers ──
   const handleWatermarkImageUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -4464,6 +4813,24 @@ export default function EditorPage() {
         pageIndices.push(i);
       }
 
+      // Shrink a single oversized watermark to fit the smallest target page,
+      // exactly as the preview does (BE-314).
+      let fittedSize = watermarkSize;
+      if (!watermarkMosaic) {
+        const natural = watermarkNaturalSize(watermarkType, watermarkText, watermarkSize, watermarkImageDims, watermarkShapeType);
+        let fit = 1;
+        for (const idx of pageIndices) {
+          const pg = doc.pages[idx];
+          if (!pg) continue;
+          const rot = ((pg.rotate % 360) + 360) % 360;
+          const sideways = rot === 90 || rot === 270;
+          const pw = sideways ? pg.mediaBox.height : pg.mediaBox.width;
+          const ph = sideways ? pg.mediaBox.width : pg.mediaBox.height;
+          fit = Math.min(fit, watermarkFitScale(natural.width, natural.height, watermarkRotation, pw, ph));
+        }
+        fittedSize = watermarkSize * fit;
+      }
+
       if (watermarkType === 'text') {
         const r = parseInt(watermarkColor.slice(1, 3), 16) / 255;
         const g = parseInt(watermarkColor.slice(3, 5), 16) / 255;
@@ -4480,8 +4847,8 @@ export default function EditorPage() {
           tile: watermarkMosaic,
           layer: watermarkLayer,
           fontName: watermarkFontName,
-          fontSize: Math.round(72 * (watermarkSize / 100)),
-          position: watermarkPosition as any,
+          fontSize: Math.max(1, Math.round(72 * (fittedSize / 100))),
+          position: watermarkPosition,
           pageIndices
         };
       } else if (watermarkType === 'shape') {
@@ -4493,7 +4860,7 @@ export default function EditorPage() {
         const sg = parseInt(watermarkShapeColor.slice(3, 5), 16) / 255;
         const sb = parseInt(watermarkShapeColor.slice(5, 7), 16) / 255;
 
-        const fontSizePt = Math.round(72 * (watermarkSize / 100));
+        const fontSizePt = Math.max(1, Math.round(72 * (fittedSize / 100)));
         const textWidth = watermarkText.length * fontSizePt * 0.5;
 
         let finalWidth = textWidth + 40;
@@ -4520,9 +4887,9 @@ export default function EditorPage() {
           rotation: watermarkRotation,
           tile: watermarkMosaic,
           layer: watermarkLayer,
-          position: watermarkPosition as any,
+          position: watermarkPosition,
           pageIndices
-        } as any;
+        };
       } else {
         if (!watermarkImageBytes || !watermarkImageDims || !watermarkImageFile) {
           setError('Please upload an image first');
@@ -4536,14 +4903,14 @@ export default function EditorPage() {
           type: 'image',
           imageBytes: watermarkImageBytes,
           mimeType,
-          width: watermarkImageDims.width * (watermarkSize / 100),
-          height: watermarkImageDims.height * (watermarkSize / 100),
+          width: watermarkImageDims.width * (fittedSize / 100),
+          height: watermarkImageDims.height * (fittedSize / 100),
           opacity: watermarkOpacity / 100,
           blendMode: watermarkBlendMode,
           rotation: watermarkRotation,
           tile: watermarkMosaic,
           layer: watermarkLayer,
-          position: watermarkPosition as any,
+          position: watermarkPosition,
           pageIndices
         };
       }
@@ -4566,11 +4933,11 @@ export default function EditorPage() {
         setShowApplySuccessModal(true);
       }).catch(err => {
         console.error('[Editor] Apply watermark failed:', err);
-        setError(`Failed to apply watermark: ${err instanceof Error ? err.message : String(err)}`);
+        setError(actionErrorMessage('Couldn\'t apply the watermark', err));
       });
     } catch (e) {
       console.error('[Editor] Apply watermark failed:', e);
-      setError(`Failed to apply watermark: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t apply the watermark', e));
     }
   }, [doc, watermarkType, watermarkText, watermarkFontName, watermarkOpacity, watermarkRotation, watermarkSize, watermarkPosition, watermarkMosaic, watermarkPageFrom, watermarkPageTo, watermarkLayer, watermarkColor, watermarkShapeColor, watermarkShapeType, watermarkImageBytes, watermarkImageDims, watermarkImageFile, watermarkBlendMode]);
 
@@ -4656,7 +5023,7 @@ export default function EditorPage() {
       setDetectedWatermarks(detections);
     } catch (e) {
       console.error('[Editor] Scan watermarks failed:', e);
-      setError(`Failed to scan watermarks: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t look for watermarks', e));
     }
   }, [doc]);
 
@@ -4676,7 +5043,7 @@ export default function EditorPage() {
       setIsDirty(true);
     } catch (e) {
       console.error('[Editor] Remove watermarks failed:', e);
-      setError(`Failed to remove watermarks: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t remove the watermarks', e));
     }
   }, [doc, detectedWatermarks]);
 
@@ -4752,19 +5119,38 @@ export default function EditorPage() {
       signedPristineRef.current = keepSigned;
     } catch (e) {
       console.error('[Editor] Download failed:', e);
-      setError(`Download failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t prepare the download', e));
     } finally {
       setIsSaving(false);
     }
   }, [doc, currentPage, fileName, saveMode, isDirty, setIsDirty, createExportDocWithOverlays]);
 
   // ── Compressed Download ──
+  const [signedCompressOpen, setSignedCompressOpen] = useState(false);
+  const signedCompressResolveRef = useRef<((choice: SignedCompressChoice) => void) | null>(null);
+  const chooseSignedCompress = useCallback((choice: SignedCompressChoice) => {
+    setSignedCompressOpen(false);
+    signedCompressResolveRef.current?.(choice);
+    signedCompressResolveRef.current = null;
+  }, []);
+
   const handleCompressedDownload = useCallback(async (opts: {
     quality: number;
     dpi: number;
     targetBytes?: number;
   }) => {
     if (!doc || !engineRef.current) return;
+    if (hasDigitalSignature(doc.rawBytes)) {
+      const choice = await new Promise<SignedCompressChoice>((resolve) => {
+        signedCompressResolveRef.current = resolve;
+        setSignedCompressOpen(true);
+      });
+      if (choice === 'cancel') return;
+      if (choice === 'signed') {
+        await handleDownload();
+        return;
+      }
+    }
     try {
       setIsSaving(true);
       setError(null);
@@ -4820,11 +5206,11 @@ export default function EditorPage() {
       setIsDirty(false);
     } catch (e) {
       console.error('[Editor] Compressed download failed:', e);
-      setError(`Compression failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t compress the PDF', e));
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, fileName, createExportDocWithOverlays]);
+  }, [doc, currentPage, fileName, createExportDocWithOverlays, handleDownload]);
 
   const handleClose = useCallback(async () => {
     await clearEditorSession();
@@ -4868,7 +5254,7 @@ export default function EditorPage() {
       }
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to delete page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t delete the page', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -4878,7 +5264,7 @@ export default function EditorPage() {
       engineRef.current.rotatePageBy(doc, index, 90);
       refreshAfterPageOp(doc);
     } catch (e) {
-      setError(`Failed to rotate page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t rotate the page', e));
     }
   }, [doc, refreshAfterPageOp]);
 
@@ -4896,7 +5282,7 @@ export default function EditorPage() {
       }
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to reorder pages: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t reorder the pages', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -4909,7 +5295,7 @@ export default function EditorPage() {
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, insertAt);
       refreshAfterPageOp(doc);
     } catch (e) {
-      setError(`Failed to merge PDF: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t merge the PDF', e));
     }
   }, [doc, refreshAfterPageOp]);
 
@@ -4930,7 +5316,7 @@ export default function EditorPage() {
       const base = (fileName || 'document').replace(/\.pdf$/i, '');
       downloadPdfBytes(bytes, `${base}-page-${currentPage + 1}.pdf`);
     } catch (e) {
-      setError(`Failed to split page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t split the page', e));
     } finally {
       setIsSaving(false);
     }
@@ -4939,9 +5325,11 @@ export default function EditorPage() {
   const handleSplitAllPages = useCallback(async () => {
     if (!doc || !engineRef.current) return;
     if (doc.pages.length < 2) return;
-    const ok = window.confirm(
-      `Download ${doc.pages.length} separate PDF files (one per page)?`,
-    );
+    const ok = await confirmDialog({
+      title: 'Split into separate files?',
+      description: `This downloads ${doc.pages.length} PDF files, one for each page.`,
+      confirmLabel: `Download ${doc.pages.length} files`,
+    });
     if (!ok) return;
     try {
       setIsSaving(true);
@@ -4962,15 +5350,21 @@ export default function EditorPage() {
         await new Promise((r) => setTimeout(r, 120));
       }
     } catch (e) {
-      setError(`Failed to split pages: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t split the pages', e));
     } finally {
       setIsSaving(false);
     }
   }, [doc, currentPage, fileName, downloadPdfBytes, createExportDocWithOverlays]);
 
-  const handleRemoveCurrentPage = useCallback(() => {
+  const handleRemoveCurrentPage = useCallback(async () => {
     if (!doc || doc.pages.length <= 1) return;
-    if (!window.confirm(`Remove page ${currentPage + 1}?`)) return;
+    const ok = await confirmDialog({
+      title: `Remove page ${currentPage + 1}?`,
+      description: 'The page and everything on it will be removed from this document.',
+      confirmLabel: 'Remove page',
+      destructive: true,
+    });
+    if (!ok) return;
     handleDeletePage(currentPage);
   }, [doc, currentPage, handleDeletePage]);
 
@@ -4986,9 +5380,12 @@ export default function EditorPage() {
         const pageArea = Math.max(1, page.mediaBox.width * page.mediaBox.height);
         const imgArea = Math.max(0, item.width) * Math.max(0, item.height);
         if (imgArea / pageArea >= 0.5) {
-          const ok = window.confirm(
-            'This image covers most of the page. Deleting it will remove most of what you see. Continue?',
-          );
+          const ok = await confirmDialog({
+            title: 'Delete this image?',
+            description: 'This image covers most of the page, so deleting it removes most of what you see.',
+            confirmLabel: 'Delete image',
+            destructive: true,
+          });
           if (!ok) return;
         }
 
@@ -5043,7 +5440,7 @@ export default function EditorPage() {
       setThumbnailKey(k => k + 1);
     } catch (e) {
       console.error('[Editor] Delete object failed:', e);
-      setError(`Delete failed: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t delete that', e));
     }
   }, [doc, currentPage, selectedDisplayItem, fileName, pushEditorHistory]);
 
@@ -5070,10 +5467,15 @@ export default function EditorPage() {
       dataUrl: record.dataUrl,
     };
 
-    setFloatingImages(prev => [...prev, newFloatingImage]);
+    updateFloatingImages(prev => [...prev, newFloatingImage], 'restore-image');
     setActiveFloatingImageId(newFloatingImage.id);
-    setIsDirty(true);
-  }, [doc, currentPage]);
+    // A restored image leaves the bin, so it can't be restored twice (BE-310).
+    setRemovedImages(prev => {
+      const next = prev.filter(r => r.id !== record.id);
+      void saveRemovedImages(next);
+      return next;
+    });
+  }, [doc, currentPage, updateFloatingImages]);
 
   const handleInsertRemovedImage = useCallback((record: RemovedImageRecord) => {
     if (!doc) return;
@@ -5096,10 +5498,9 @@ export default function EditorPage() {
       dataUrl: record.dataUrl,
     };
 
-    setFloatingImages(prev => [...prev, newFloatingImage]);
+    updateFloatingImages(prev => [...prev, newFloatingImage], 'restore-image');
     setActiveFloatingImageId(newFloatingImage.id);
-    setIsDirty(true);
-  }, [doc, currentPage]);
+  }, [doc, currentPage, updateFloatingImages]);
 
   const handleDeleteRemovedImage = useCallback((id: string) => {
     setRemovedImages(prev => {
@@ -5121,7 +5522,7 @@ export default function EditorPage() {
       const nextPage = currentPage >= index ? currentPage + 1 : currentPage;
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to insert blank page: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t insert a blank page', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -5134,7 +5535,7 @@ export default function EditorPage() {
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
       refreshAfterPageOp(doc, nextPage);
     } catch (e) {
-      setError(`Failed to insert PDF: ${e instanceof Error ? e.message : String(e)}`);
+      setError(actionErrorMessage('Couldn\'t insert the PDF', e));
     }
   }, [doc, currentPage, refreshAfterPageOp]);
 
@@ -5142,6 +5543,13 @@ export default function EditorPage() {
   // ── Keyboard shortcuts (global — NOT during editing) ──
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
+      // Zoom works everywhere, including while a line or text box is being edited (BE-111).
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === '+' || e.key === '=' || e.key === '-' || e.key === '_')) {
+        e.preventDefault();
+        if (e.key === '-' || e.key === '_') zoomOut();
+        else zoomIn();
+        return;
+      }
       // Don't intercept when the hidden input has focus (editing)
       if (editingLine) return;
 
@@ -5150,9 +5558,9 @@ export default function EditorPage() {
       if (focusedTag === 'INPUT' || focusedTag === 'TEXTAREA' || focusedTag === 'SELECT') return;
       if ((document.activeElement as HTMLElement | null)?.isContentEditable) return;
 
-      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      if (e.key === 'ArrowLeft' || e.key === 'ArrowUp' || e.key === 'PageUp') {
         e.preventDefault(); goToPrev();
-      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === 'PageDown') {
         e.preventDefault(); goToNext();
       } else if (e.key === '+' || e.key === '=') {
         if (e.metaKey || e.ctrlKey) { e.preventDefault(); zoomIn(); }
@@ -5176,6 +5584,9 @@ export default function EditorPage() {
         if (!e.metaKey && !e.ctrlKey) setActiveTool('erase');
       } else if (e.key === 's' || e.key === 'S') {
         if (!e.metaKey && !e.ctrlKey && !e.shiftKey) setActiveTool('sign');
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedDrawing) {
+        e.preventDefault();
+        handleDeleteSelectedDrawing();
       } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedSignatureId) {
         e.preventDefault();
         handleSignatureDelete(selectedSignatureId);
@@ -5209,8 +5620,12 @@ export default function EditorPage() {
             return updated;
           });
         }
-        setFloatingImages(prev => prev.filter(p => p.id !== activeFloatingImageId));
+        updateFloatingImages(prev => prev.filter(p => p.id !== activeFloatingImageId), 'delete-image');
         setActiveFloatingImageId(null);
+      } else if (e.key === 'r' || e.key === 'R') {
+        if (!e.metaKey && !e.ctrlKey) setActiveTool('redact');
+      } else if (e.key === 'l' || e.key === 'L') {
+        if (!e.metaKey && !e.ctrlKey) selectTool('link');
       } else if (e.key === 'w' || e.key === 'W') {
         if (!e.metaKey && !e.ctrlKey) setActiveTool('watermark');
       } else if (e.key === 'x' || e.key === 'X') {
@@ -5225,7 +5640,7 @@ export default function EditorPage() {
     }
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures]);
+  }, [selectTool, goToPrev, goToNext, zoomIn, zoomOut, editingLine, selectedSignatureId, handleSignatureDelete, selectedDisplayItem, handleDeleteSelectedDisplayItem, activeFloatingImageId, floatingImages, fileName, currentPage, activeTool, handleValidateSignatures, updateFloatingImages, selectedDrawing, handleDeleteSelectedDrawing]);
 
   // ── Global clipboard paste listener for images (Ctrl+V on Windows / Cmd+V on Mac) ──
   useEffect(() => {
@@ -5299,9 +5714,8 @@ export default function EditorPage() {
                 rotation: 0,
               };
 
-              setFloatingImages(prev => [...prev, newImg]);
+              updateFloatingImages(prev => [...prev, newImg], 'paste-image');
               setActiveFloatingImageId(newImg.id);
-              setIsDirty(true);
             };
             img.src = dataUrl;
           };
@@ -5313,7 +5727,7 @@ export default function EditorPage() {
 
     window.addEventListener('paste', handlePaste);
     return () => window.removeEventListener('paste', handlePaste);
-  }, [doc, currentPage]);
+  }, [doc, currentPage, updateFloatingImages]);
 
   // Clean, Minimalist 3D Tilted Pink Square Rubber Block Eraser Cursor
   const eraser3dSvg = `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32"><defs><filter id="er-pinksq-shadow" x="-30%" y="-30%" width="160%" height="160%"><feDropShadow dx="1" dy="1.4" stdDeviation="1.2" flood-color="#000000" flood-opacity="0.45"/></filter><linearGradient id="er-pink-top" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FFA8E0"/><stop offset="60%" stop-color="#FF65C8"/><stop offset="100%" stop-color="#E840A8"/></linearGradient><linearGradient id="er-pink-left" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#FF52B7"/><stop offset="100%" stop-color="#D6208A"/></linearGradient><linearGradient id="er-pink-right" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#BF157A"/><stop offset="100%" stop-color="#80094F"/></linearGradient></defs><g filter="url(#er-pinksq-shadow)"><path d="M 4 16 L 16 4 L 28 16 L 28 19 L 16 31 L 4 19 Z" fill="none" stroke="#FFFFFF" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/><path d="M 4 16 L 16 4 L 28 16 L 16 28 Z" fill="url(#er-pink-top)" stroke="#80094F" stroke-width="0.6"/><path d="M 4 16 L 16 28 L 16 31 L 4 19 Z" fill="url(#er-pink-left)" stroke="#80094F" stroke-width="0.6"/><path d="M 16 28 L 28 16 L 28 19 L 16 31 Z" fill="url(#er-pink-right)" stroke="#80094F" stroke-width="0.6"/><path d="M 4 16 L 16 4 L 22 10 L 10 22 Z" fill="#FFFFFF" fill-opacity="0.45"/><circle cx="4" cy="28" r="0.8" fill="#FFFFFF" stroke="#80094F" stroke-width="0.4"/></g></svg>`;
@@ -5506,6 +5920,7 @@ export default function EditorPage() {
       {/* ── Top toolbar ── */}
       <Toolbar
         fileName={fileName}
+        isDirty={isDirty}
         currentPage={currentPage}
         totalPages={totalPages}
         scale={scale}
@@ -5546,7 +5961,7 @@ export default function EditorPage() {
         {/* ── Left sidebar (Tools only) — on mobile renders as fixed bottom strip ── */}
         <ToolsSidebar
           activeTool={activeTool}
-          setActiveTool={setActiveTool}
+          setActiveTool={selectTool}
           highlightColor={highlightColor}
           isPanelOpen={isPanelOpen}
           onTogglePanel={() => setIsPanelOpen(v => !v)}
@@ -5570,7 +5985,7 @@ export default function EditorPage() {
           ) : (
             <PropertiesSidebar
               activeTool={activeTool}
-              setActiveTool={setActiveTool}
+              setActiveTool={selectTool}
               onClose={() => setIsPanelOpen(false)}
               selectedRun={selectedLine?.runs[0] ?? null}
           textFontFamily={textFontFamily}
@@ -5603,21 +6018,7 @@ export default function EditorPage() {
           setEraserSize={setEraserSize}
           pageLinkCount={pageLinks.length}
           linksHighlighted={linksHighlighted}
-          onScanLinks={() => {
-            if (!doc || !engineRef.current) return;
-            try {
-              const links = engineRef.current.listPageLinks(doc, currentPage);
-              setPageLinks(links);
-              setLinksHighlighted(true);
-              setLinkCreatePending(false);
-              closeLinkPopover();
-              if (links.length === 0) {
-                window.alert('No links found on this page.');
-              }
-            } catch (err) {
-              console.warn('[Editor] Scan links failed:', err);
-            }
-          }}
+          onScanLinks={scanPageLinks}
           hasSelectedLink={false}
           linkCreatePending={linkCreatePending}
           selectedLinkUrl={linkDraftUrl}
@@ -5630,7 +6031,7 @@ export default function EditorPage() {
             // Create from current text selection / line
             const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
             if (!line) {
-              window.alert('Select or click a text line first, then add a link.');
+              void noticeDialog({ title: 'Select text first', description: LINK_NEEDS_SELECTION });
               return;
             }
             const sel = editSelRef.current;
@@ -5655,7 +6056,7 @@ export default function EditorPage() {
                 setIsDirty(true);
                 setRenderKey(k => k + 1);
               } else {
-                window.alert('Select some text first, then add a link.');
+                void noticeDialog({ title: 'Select text first', description: LINK_NEEDS_SELECTION });
               }
             } catch (err) {
               console.warn('[Editor] Add link failed:', err);
@@ -5667,8 +6068,11 @@ export default function EditorPage() {
           }}
           onAddLink={() => {
             const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
-            if (!line) {
-              window.alert('Select or click a text line first, then add a link.');
+            // Validate before asking for a URL: while editing, a collapsed caret
+            // has nothing to link.
+            const sel = editSelRef.current;
+            if (!line || (editingLine && sel.end <= sel.start)) {
+              void noticeDialog({ title: 'Select text first', description: LINK_NEEDS_SELECTION });
               return;
             }
             closeLinkPopover();
@@ -5695,6 +6099,9 @@ export default function EditorPage() {
           onFormFieldChange={handleFormFieldChange}
           onFlattenForms={handleFlattenForms}
           onDuplicateLineBelow={handleDuplicateLineBelow}
+          onRecognizeText={() => void handleRecognizeText()}
+          redactionMarkCount={redactionMarkCount}
+          onApplyRedactions={() => void handleApplyRedactions()}
           tableInfo={selectedTableCell ? {
             rows: selectedTableCell.table.rows,
             cols: selectedTableCell.table.cols,
@@ -5815,12 +6222,12 @@ export default function EditorPage() {
               <div className="pointer-events-auto flex items-center justify-between gap-2 bg-popover backdrop-blur-md px-3 py-2 rounded-xl border border-border shadow-lg w-full md:w-72">
                 <button
                   onClick={() => void handleRecognizeText()}
+                  data-testid="search-ocr-button"
                   className="flex items-center gap-2 text-xs font-semibold text-foreground/90 hover:text-primary transition-colors"
-                  title="OCR recognize text"
+                  title="Recognize text on this page with OCR, for scanned pages"
                 >
-                  <Type size={14} /> Recognize text (OCR)
+                  <Type size={14} /> Recognize Text (OCR)
                 </button>
-                {isDirty && <span data-testid="unsaved-badge" className="text-[10px] text-amber-600 dark:text-amber-400 font-semibold border-l border-border pl-2">Unsaved</span>}
               </div>
               <div className="pointer-events-auto">
                 <FindReplacePanel
@@ -5845,7 +6252,7 @@ export default function EditorPage() {
           {isRendering && (
             <div className="absolute top-4 right-4 z-30 bg-popover backdrop-blur border border-border shadow-lg rounded-full px-4 py-2 flex items-center gap-2 text-foreground/90 text-sm font-medium animate-in slide-in-from-top-4 fade-in">
               <Loader2 size={16} className="animate-spin text-primary" />
-              Rendering...
+              Rendering…
             </div>
           )}
 
@@ -5928,7 +6335,9 @@ export default function EditorPage() {
               })}
 
             {/* DOM overlays for FloatingText */}
-            {activeTool === 'watermark' && watermarkLivePreview && (
+            {/* Preview only on pages the watermark will be applied to (BE-314). */}
+            {activeTool === 'watermark' && watermarkLivePreview &&
+              currentPage + 1 >= watermarkPageFrom && currentPage + 1 <= watermarkPageTo && (
               <WatermarkPreview
                 doc={doc}
                 currentPage={currentPage}
@@ -6081,7 +6490,7 @@ export default function EditorPage() {
                     }}
                   >
                     <span className="absolute -top-5 left-0 text-[9px] px-1 rounded bg-sky-700 text-white whitespace-nowrap">
-                      {field.fieldName}{field.signed ? ' · signed' : field.hasAppearance ? ' · AP' : ''}
+                      {joinParts(field.fieldName, field.signed ? 'Signed' : field.hasAppearance && 'Visible')}
                     </span>
                   </div>
                 );
@@ -6122,6 +6531,16 @@ export default function EditorPage() {
                     </button>
                   )}
                   <textarea
+                    ref={(el) => {
+                      // Focus a just-created box so typing goes into it instead
+                      // of triggering tool shortcuts.
+                      if (el && focusFloatingTextIdRef.current === ft.id) {
+                        focusFloatingTextIdRef.current = null;
+                        el.focus();
+                        el.select();
+                      }
+                    }}
+                    aria-label="Text box"
                     value={ft.text}
                     onChange={(e) => {
                       setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text: e.target.value } : p));
@@ -6165,9 +6584,18 @@ export default function EditorPage() {
               const isActive = activeFloatingImageId === fi.id;
               const rot = fi.rotation || 0;
 
+              // Upright panel beside the image's rotated bounding box.
+              const frameW = fi.pdfWidth * scale + 8;
+              const frameH = fi.pdfHeight * scale + 8;
+              const rad = (rot * Math.PI) / 180;
+              const halfW = (frameW * Math.abs(Math.cos(rad)) + frameH * Math.abs(Math.sin(rad))) / 2;
+              const halfH = (frameW * Math.abs(Math.sin(rad)) + frameH * Math.abs(Math.cos(rad))) / 2;
+              const panelLeft = cssX + frameW / 2 + halfW + 10;
+              const panelTop = cssY + frameH / 2 - halfH;
+
               return (
+                <Fragment key={fi.id}>
                 <div
-                  key={fi.id}
                   className={`floating-image-container absolute z-20 cursor-move border-2 ${isActive ? 'border-primary border-dashed' : 'border-transparent hover:border-border-strong hover:border-dashed'} p-1 -m-1`}
                   style={{
                     left: cssX,
@@ -6229,7 +6657,7 @@ export default function EditorPage() {
                               return updated;
                             });
                           }
-                          setFloatingImages(prev => prev.filter(p => p.id !== fi.id));
+                          updateFloatingImages(prev => prev.filter(p => p.id !== fi.id), 'delete-image');
                           if (activeFloatingImageId === fi.id) setActiveFloatingImageId(null);
                         }}
                       >
@@ -6259,16 +6687,15 @@ export default function EditorPage() {
                               pdfHeight: fi.pdfHeight,
                               rotation: fi.rotation,
                             };
-                            setFloatingImages(prev => [...prev, dup]);
+                            updateFloatingImages(prev => [...prev, dup], 'duplicate-image');
                             setActiveFloatingImageId(dup.id);
-                            setIsDirty(true);
                           }
                         }}
                       >
                         <Copy size={12} />
                       </button>
                       <button
-                        className="absolute -bottom-3 -right-3 bg-primary text-white rounded-full p-1 shadow hover:bg-bloom-600 transition-colors z-30"
+                        className="absolute -bottom-3 -left-3 bg-primary text-white rounded-full p-1 shadow hover:bg-bloom-600 transition-colors z-30"
                         title="Replace Image"
                         onClick={(e) => {
                           e.stopPropagation();
@@ -6279,71 +6706,14 @@ export default function EditorPage() {
                         <Image size={12} />
                       </button>
 
-                      {/* Dimensions panel in cm + Rotation */}
-                      <div
-                        className="absolute top-0 -right-[118px] bg-popover text-foreground rounded-lg p-2 shadow-xl border border-border text-xs flex flex-col gap-2 z-30 w-28"
-                        onClick={e => e.stopPropagation()}
-                        onPointerDown={e => e.stopPropagation()}
-                      >
-                        <div className="text-[9px] text-muted-foreground font-bold uppercase tracking-wider mb-0.5">Transform</div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-muted-foreground w-3 text-center">W</span>
-                          <input
-                            type="number"
-                            value={Math.round((fi.pdfWidth * 2.54 * 10) / 72) / 10}
-                            onChange={e => {
-                              const newW = (parseFloat(e.target.value) * 72) / 2.54;
-                              if (newW > 0) setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: newW } : p));
-                            }}
-                            className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
-                            step="0.1"
-                          />
-                          <span className="text-muted-foreground text-[10px]">cm</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-1">
-                          <span className="text-muted-foreground w-3 text-center">H</span>
-                          <input
-                            type="number"
-                            value={Math.round((fi.pdfHeight * 2.54 * 10) / 72) / 10}
-                            onChange={e => {
-                              const newH = (parseFloat(e.target.value) * 72) / 2.54;
-                              if (newH > 0) setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfHeight: newH } : p));
-                            }}
-                            className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
-                            step="0.1"
-                          />
-                          <span className="text-muted-foreground text-[10px]">cm</span>
-                        </div>
-                        <div className="flex items-center justify-between gap-1 border-t border-border pt-1.5 mt-0.5">
-                          <span className="text-muted-foreground w-3 text-center">↻</span>
-                          <input
-                            type="number"
-                            value={Math.round(rot)}
-                            onChange={e => {
-                              const val = (parseFloat(e.target.value) || 0) % 360;
-                              setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: (val + 360) % 360 } : p));
-                            }}
-                            className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
-                          />
-                          <button
-                            type="button"
-                            title="Rotate 90° clockwise"
-                            className="p-1 hover:bg-muted rounded text-foreground/90 hover:text-primary transition-colors"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: ((p.rotation || 0) + 90) % 360 } : p));
-                            }}
-                          >
-                            <RotateCw size={11} />
-                          </button>
-                        </div>
-                      </div>
                     </>
                   )}
 
-                  {/* CSS Resize Handle (only active when hovered to avoid drag conflict) */}
+                  {/* Resize handle: shown only while the image is selected (BE-313) */}
+                  {isActive && (
                   <div
-                    className="absolute bottom-0 right-0 w-3 h-3 cursor-se-resize bg-primary/50"
+                    title="Drag to resize"
+                    className="absolute -bottom-1.5 -right-1.5 w-3.5 h-3.5 cursor-se-resize rounded-sm border border-white bg-primary shadow z-30"
                     onPointerDown={e => {
                       e.stopPropagation(); // prevent dragging
                       const startX = e.clientX;
@@ -6351,13 +6721,16 @@ export default function EditorPage() {
                       const startW = fi.pdfWidth * scale;
                       const startH = fi.pdfHeight * scale;
 
+                      let resized = false;
                       const handleMove = (me: PointerEvent) => {
                         const newW = startW + (me.clientX - startX);
                         const newH = startH + (me.clientY - startY);
-                        setFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: Math.max(10, newW / scale), pdfHeight: Math.max(10, newH / scale) } : p));
+                        resized = true;
+                        updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: Math.max(10, newW / scale), pdfHeight: Math.max(10, newH / scale) } : p));
                       };
 
                       const handleUp = () => {
+                        if (resized) recordFloatingImages('resize-image');
                         window.removeEventListener('pointermove', handleMove);
                         window.removeEventListener('pointerup', handleUp);
                       };
@@ -6366,13 +6739,77 @@ export default function EditorPage() {
                       window.addEventListener('pointerup', handleUp);
                     }}
                   />
+                  )}
                 </div>
+                {/* Transform panel, outside the rotated frame so it stays upright (BE-309) */}
+                {isActive && (
+                  <div
+                    className="absolute bg-popover text-foreground rounded-lg p-2 shadow-xl border border-border text-xs flex flex-col gap-2 z-30 w-28"
+                    style={{ left: panelLeft, top: panelTop }}
+                    onClick={e => e.stopPropagation()}
+                    onPointerDown={e => e.stopPropagation()}
+                  >
+                    <div className="text-[9px] text-muted-foreground font-bold uppercase tracking-wider mb-0.5">Transform</div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-muted-foreground w-3 text-center">W</span>
+                      <input
+                        type="number"
+                        value={Math.round(fi.pdfWidth)}
+                        onChange={e => {
+                          const newW = parseFloat(e.target.value);
+                          if (newW > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfWidth: newW } : p), 'resize-image');
+                        }}
+                        className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
+                        step="1"
+                      />
+                      <span className="text-muted-foreground text-[10px]">pt</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-muted-foreground w-3 text-center">H</span>
+                      <input
+                        type="number"
+                        value={Math.round(fi.pdfHeight)}
+                        onChange={e => {
+                          const newH = parseFloat(e.target.value);
+                          if (newH > 0) updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, pdfHeight: newH } : p), 'resize-image');
+                        }}
+                        className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
+                        step="1"
+                      />
+                      <span className="text-muted-foreground text-[10px]">pt</span>
+                    </div>
+                    <div className="flex items-center justify-between gap-1 border-t border-border pt-1.5 mt-0.5">
+                      <span className="text-muted-foreground w-3 text-center">↻</span>
+                      <input
+                        type="number"
+                        value={Math.round(rot)}
+                        onChange={e => {
+                          const val = (parseFloat(e.target.value) || 0) % 360;
+                          updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: (val + 360) % 360 } : p), 'rotate-image');
+                        }}
+                        className="w-10 bg-muted rounded px-1 py-0.5 text-right no-spinners outline-none focus:ring-1 focus:ring-primary"
+                      />
+                      <button
+                        type="button"
+                        title="Rotate 90° clockwise"
+                        className="p-1 hover:bg-muted rounded text-foreground/90 hover:text-primary transition-colors"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          updateFloatingImages(prev => prev.map(p => p.id === fi.id ? { ...p, rotation: ((p.rotation || 0) + 90) % 360 } : p), 'rotate-image');
+                        }}
+                      >
+                        <RotateCw size={11} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+                </Fragment>
               );
             })}
 
             {/* Word-like line editor — same size/position as canvas text */}
-            {editingLine && editAnchorLineRef.current && renderResult && doc && (() => {
-              const anchor = editAnchorLineRef.current!;
+            {editingLine && editAnchorLine && renderResult && doc && (() => {
+              const anchor = editAnchorLine;
               const bounds = getLineBounds(anchor);
               const page = doc.pages[currentPage];
               const { mediaBox } = page;
@@ -6387,10 +6824,6 @@ export default function EditorPage() {
                 if (ov.fontSize != null) {
                   maxFontSizeCss = Math.max(maxFontSizeCss, ov.fontSize * scale);
                 }
-              }
-              const tsSize = typingStyleRef.current.fontSize;
-              if (tsSize != null) {
-                maxFontSizeCss = Math.max(maxFontSizeCss, tsSize * scale);
               }
               // Include sidebar size while typing so the box grows with the caret style
               if (editSel.end <= editSel.start && textFontSize > 0) {
@@ -6421,7 +6854,7 @@ export default function EditorPage() {
               const pathItems = strokePaths;
               const edits = distributeTextChangeToSegments(
                 anchor,
-                initialRunTextRef.current || anchor.text,
+                anchor.text,
                 editText,
                 caretPos,
               );
@@ -6733,7 +7166,7 @@ export default function EditorPage() {
           <div role="dialog" aria-label="Watermark applied" className="bg-popover border border-border rounded-2xl p-6 shadow-2xl max-w-sm w-full text-center animate-scale-in">
             <h3 className="text-foreground font-bold text-lg mb-4">Watermark applied</h3>
             <p className="text-muted-foreground text-sm mb-6 leading-relaxed">
-              Watermark has been applied and live preview is off. To add more watermarks, turn on the live preview to preview it live.
+              The watermark has been applied and Live Preview is off. To add another watermark, turn Live Preview back on.
             </p>
             <button
               onClick={() => setShowApplySuccessModal(false)}
@@ -6760,6 +7193,8 @@ export default function EditorPage() {
       />
 
       {/* ── Export Panel ── */}
+      <ConfirmDialogHost />
+      <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} />
       <ExportPanel
         isOpen={showExportPanel}
         onClose={() => setShowExportPanel(false)}
@@ -6772,4 +7207,16 @@ export default function EditorPage() {
       />
     </div>
   );
+}
+
+/** True when the file contains a digital signature (a signature dictionary with /ByteRange). */
+function hasDigitalSignature(bytes: Uint8Array | ArrayBuffer | null | undefined): boolean {
+  if (!bytes) return false;
+  const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+  const needle = [0x2f, 0x42, 0x79, 0x74, 0x65, 0x52, 0x61, 0x6e, 0x67, 0x65]; // "/ByteRange"
+  outer: for (let i = 0; i <= view.length - needle.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (view[i + j] !== needle[j]) continue outer;
+    return true;
+  }
+  return false;
 }

@@ -631,7 +631,7 @@ export function addAnnotationToPage(
   annotRef: PDFRef,
   objects: Map<string, PDFObject>,
 ): void {
-  let annots = pageDict.get('Annots');
+  const annots = pageDict.get('Annots');
 
   if (!annots) {
     // Create new Annots array
@@ -648,6 +648,22 @@ export function addAnnotationToPage(
 
   // Store the annotation object
   objects.set(annotRef.toKey(), annotDict);
+
+  // Streams must be indirect objects (ISO 32000-2 §7.3.8). An inline /AP /N
+  // stream is lost when the file is reopened, which made Bloom's own strokes
+  // and highlights disappear; store it as its own object.
+  const ap = annotDict.get('AP');
+  if (ap instanceof PDFDict) {
+    for (const key of ['N', 'R', 'D']) {
+      const stream = ap.get(key);
+      if (!(stream instanceof PDFStream)) continue;
+      let max = 0;
+      for (const k of objects.keys()) max = Math.max(max, parseInt(k.split('_')[0], 10) || 0);
+      const ref = new PDFRef(max + 1, 0);
+      objects.set(ref.toKey(), stream);
+      ap.set(key, ref);
+    }
+  }
 }
 
 /**
@@ -695,17 +711,24 @@ function distToSegment(
   return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
 }
 
+/** A markup annotation found under a point. */
+export interface MarkupAnnotationHit {
+  ref: PDFRef;
+  subtype: string;
+  rect: PDFRectangle;
+}
+
 /**
- * Erase Highlight / Ink annotations whose geometry is near (pdfX, pdfY).
- * Returns how many annotations were removed.
+ * Markup annotations (highlights, ink, lines, shapes) whose geometry is near
+ * (pdfX, pdfY), in /Annots order (topmost last).
  */
-export function eraseAnnotationsAtPoint(
+export function findMarkupAnnotationsAtPoint(
   pageDict: PDFDict,
   objects: Map<string, PDFObject>,
   pdfX: number,
   pdfY: number,
   radius: number,
-): number {
+): MarkupAnnotationHit[] {
   const annots = pageDict.get('Annots');
   let arr: PDFArray | null = null;
   if (annots instanceof PDFArray) arr = annots;
@@ -713,9 +736,9 @@ export function eraseAnnotationsAtPoint(
     const resolved = objects.get(annots.toKey());
     if (resolved instanceof PDFArray) arr = resolved;
   }
-  if (!arr) return 0;
+  if (!arr) return [];
 
-  const toRemove: PDFRef[] = [];
+  const hits: MarkupAnnotationHit[] = [];
 
   for (const item of arr.items) {
     if (!(item instanceof PDFRef)) continue;
@@ -809,13 +832,40 @@ export function eraseAnnotationsAtPoint(
       }
     }
 
-    if (hit) toRemove.push(item);
+    if (hit) hits.push({ ref: item, subtype: name, rect: { x: rx, y: ry, width: rw, height: rh } });
   }
 
-  for (const ref of toRemove) {
+  return hits;
+}
+
+/** Topmost markup annotation under (pdfX, pdfY), for the Select tool (BE-307). */
+export function hitTestMarkupAnnotation(
+  pageDict: PDFDict,
+  objects: Map<string, PDFObject>,
+  pdfX: number,
+  pdfY: number,
+  radius: number,
+): MarkupAnnotationHit | null {
+  const hits = findMarkupAnnotationsAtPoint(pageDict, objects, pdfX, pdfY, radius);
+  return hits.length > 0 ? hits[hits.length - 1] : null;
+}
+
+/**
+ * Erase Highlight / Ink annotations whose geometry is near (pdfX, pdfY).
+ * Returns how many annotations were removed.
+ */
+export function eraseAnnotationsAtPoint(
+  pageDict: PDFDict,
+  objects: Map<string, PDFObject>,
+  pdfX: number,
+  pdfY: number,
+  radius: number,
+): number {
+  const hits = findMarkupAnnotationsAtPoint(pageDict, objects, pdfX, pdfY, radius);
+  for (const { ref } of hits) {
     removeAnnotationFromPage(pageDict, ref, objects);
   }
-  return toRemove.length;
+  return hits.length;
 }
 
 /**

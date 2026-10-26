@@ -1,5 +1,6 @@
 'use client';
 
+import { joinParts } from '@/lib/format';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { X, Upload, KeyRound, Trash2, Check } from 'lucide-react';
@@ -24,6 +25,7 @@ export function CertificateImportDialog({
   const [identities, setIdentities] = useState<ManagedIdentity[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [password, setPassword] = useState('');
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [pemPaste, setPemPaste] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -43,11 +45,17 @@ export function CertificateImportDialog({
   useEffect(() => {
     refreshRef.current = refresh;
   }, [refresh]);
+  const [wasOpen, setWasOpen] = useState(open);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setError(null);
+      setPassword('');
+      setPemPaste('');
+    }
+  }
   useEffect(() => {
     if (!open) return;
-    setError(null);
-    setPassword('');
-    setPemPaste('');
     // Hydrate may be async on first open
     const t = window.setTimeout(() => refreshRef.current(), 50);
     return () => window.clearTimeout(t);
@@ -64,14 +72,18 @@ export function CertificateImportDialog({
     refresh();
   };
 
-  const importFile = async (file: File) => {
+  const importFile = async (file: File, filePassword = '') => {
     setBusy(true);
     setError(null);
     try {
-      const identity = await getCertificateManager().importFile(file, password);
+      const identity = await getCertificateManager().importFile(file, filePassword);
       setSelectedId(identity.id);
+      setPendingFile(null);
+      setPassword('');
       refresh();
     } catch (err) {
+      // Password-protected .p12/.pfx: keep the file and ask for its password.
+      if (err instanceof Error && err.name === 'Pkcs12PasswordError') setPendingFile(file);
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setBusy(false);
@@ -113,9 +125,8 @@ export function CertificateImportDialog({
 
           <div className="p-4 space-y-4 overflow-y-auto flex-1">
             <p className="text-[11px] text-muted-foreground">
-              Import PEM, DER, or P12/PFX. Private keys stay in memory for this session only.
-              Encrypted P12 files may need conversion:{' '}
-              <code className="text-muted-foreground">openssl pkcs12 -nodes</code>
+              Import a PEM, DER, or password-protected P12/PFX file. Private keys stay in memory for this
+              session only.
             </p>
 
             <div className="space-y-2">
@@ -133,23 +144,40 @@ export function CertificateImportDialog({
                   e.target.value = '';
                 }}
               />
-              <div className="flex gap-2">
-                <input
-                  type="password"
-                  placeholder="P12/PFX password (if any)"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  className="flex-1 rounded-md bg-muted border border-border px-2 py-1.5 text-xs text-foreground outline-none focus:border-border-strong"
-                />
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => fileRef.current?.click()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary hover:bg-bloom-600 disabled:opacity-50 text-white text-xs font-semibold"
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => fileRef.current?.click()}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-primary hover:bg-bloom-600 disabled:opacity-50 text-white text-xs font-semibold"
+              >
+                <Upload size={14} /> Browse
+              </button>
+              {pendingFile && (
+                <form
+                  className="flex gap-2"
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void importFile(pendingFile, password);
+                  }}
                 >
-                  <Upload size={14} /> Browse
-                </button>
-              </div>
+                  <input
+                    type="password"
+                    autoFocus
+                    aria-label={`Password for ${pendingFile.name}`}
+                    placeholder={`Password for ${pendingFile.name}`}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    className="flex-1 min-w-0 rounded-md bg-muted border border-border px-2 py-1.5 text-xs text-foreground outline-none focus:border-border-strong"
+                  />
+                  <button
+                    type="submit"
+                    disabled={busy || !password}
+                    className="px-3 py-1.5 rounded-md bg-primary hover:bg-bloom-600 disabled:opacity-50 text-white text-xs font-semibold"
+                  >
+                    Unlock
+                  </button>
+                </form>
+              )}
             </div>
 
             <div className="space-y-2">
@@ -160,7 +188,7 @@ export function CertificateImportDialog({
                 value={pemPaste}
                 aria-label="Paste PEM"
                 onChange={(e) => setPemPaste(e.target.value)}
-                placeholder="-----BEGIN CERTIFICATE-----&#10;...&#10;-----BEGIN PRIVATE KEY-----&#10;..."
+                placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----BEGIN PRIVATE KEY-----&#10;…"
                 rows={5}
                 className="w-full rounded-md bg-muted border border-border px-2 py-1.5 text-[11px] font-mono text-foreground outline-none focus:border-border-strong resize-y"
               />
@@ -210,9 +238,11 @@ export function CertificateImportDialog({
                         </div>
                         <div className="text-[10px] text-muted-foreground mt-0.5 truncate">{summary}</div>
                         <div className="text-[10px] text-app-faint mt-1">
-                          {id.source.toUpperCase()}
-                          {id.hasPrivateKey ? ' · key loaded' : ' · cert only (re-import key to sign)'}
-                          {id.certificates.length > 1 ? ` · chain ${id.certificates.length}` : ''}
+                          {joinParts(
+                            id.source.toUpperCase(),
+                            id.hasPrivateKey ? 'Ready to sign' : 'Certificate only — import its private key to sign',
+                            id.certificates.length > 1 && `Chain of ${id.certificates.length} certificates`,
+                          )}
                         </div>
                       </div>
                       <button

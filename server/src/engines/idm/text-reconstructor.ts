@@ -247,8 +247,12 @@ function synthesizeFromLayoutText(input: {
   const style = input.blocks.find((b) => b.style)?.style;
   const characters: Character[] = [];
   let i = 0;
-  for (const ch of text) {
-    if (ch === '\n') continue;
+  let prevChar = '';
+  for (const raw of text) {
+    // A layout line break is a soft wrap: keep the words apart.
+    const ch = raw === '\n' ? ' ' : raw;
+    if (raw === '\n' && (prevChar === '' || /\s/.test(prevChar))) continue;
+    prevChar = ch;
     characters.push({
       id: createId('ch'),
       parentId: input.parentBlockId,
@@ -350,7 +354,7 @@ function groupWords(
       prev.fontName === ch.fontName &&
       Math.abs((prev.fontSize ?? 0) - (ch.fontSize ?? 0)) < 0.5;
 
-    if (gap > threshold || !sameStyle) flush();
+    if (gap > threshold || !sameStyle || onNewLine(prev, ch)) flush();
     current.push(ch);
   }
   flush();
@@ -418,7 +422,7 @@ function groupRuns(
       current.push(ch);
       continue;
     }
-    if (styleKey(current[0]!) === styleKey(ch)) {
+    if (styleKey(current[0]!) === styleKey(ch) && !onNewLine(current[current.length - 1]!, ch)) {
       current.push(ch);
     } else {
       flush();
@@ -428,6 +432,13 @@ function groupRuns(
   flush();
   linkLinear(runs);
   return runs;
+}
+
+/** True when `next` sits on a different baseline from `prev` (a line wrap). */
+function onNewLine(prev: Character, next: Character): boolean {
+  if (!prev.bbox || !next.bbox) return false;
+  const size = Math.max(prev.fontSize ?? 0, next.fontSize ?? 0, prev.bbox.height, 1);
+  return Math.abs(prev.bbox.y - next.bbox.y) > size * 0.5;
 }
 
 function linkLinear<T extends { id: string; previousId: string | null; nextId: string | null }>(

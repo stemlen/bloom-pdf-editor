@@ -2,8 +2,9 @@
 
 import { useCallback, useState, useId } from 'react';
 import { useRouter } from 'next/navigation';
-import { AlertCircle, ArrowUpRight, Loader2 } from 'lucide-react';
+import { AlertCircle, ArrowUpRight, Heart, Loader2 } from 'lucide-react';
 import { savePdfToStorage } from '@/lib/pdfStorage';
+import { looksLikePdf, actionErrorMessage } from '@/lib/pdfErrors';
 import { Logo } from '@/components/art/Logo';
 import { UploadDoodle } from '@/components/art/Illustrations';
 import { CategoryIcon } from '@/components/art/CategoryIcon';
@@ -15,7 +16,7 @@ const SITE_URL = 'https://bloompdf.app';
 
 const FEATURES = [
   { cat: 'edit', title: 'Edit text in place', body: 'Click any line to rewrite it in the original font.' },
-  { cat: 'organize', title: 'Pages & images', body: 'Add, move, rotate and delete pages, images and shapes.' },
+  { cat: 'organize', title: 'Pages & images', body: 'Add, move, rotate and delete pages; place images and draw shapes.' },
   { cat: 'security', title: 'Fill, sign & protect', body: 'Forms, signatures, redaction, passwords and watermarks.' },
   { cat: 'convert-from', title: 'Export anywhere', body: 'Word, Excel, PowerPoint, HTML, Markdown, images…' },
 ];
@@ -28,12 +29,15 @@ export default function Home() {
   const router = useRouter();
 
   const handleFile = useCallback(async (file: File) => {
-    if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
-      setError(`"${file.name}" isn't a PDF. Please choose a .pdf file.`);
-      return;
-    }
     if (file.size === 0) {
       setError(`"${file.name}" is empty.`);
+      return;
+    }
+    // Decide by content, not by name: a renamed PNG is still not a PDF, and a
+    // real PDF without the .pdf extension still opens.
+    const head = new Uint8Array(await file.slice(0, 1029).arrayBuffer());
+    if (!looksLikePdf(head)) {
+      setError(`"${file.name}" isn't a PDF. Please choose a PDF file.`);
       return;
     }
 
@@ -45,7 +49,7 @@ export default function Home() {
       await savePdfToStorage(buffer, file.name);
       router.push('/editor');
     } catch (e) {
-      setError(`Couldn't open the file: ${e instanceof Error ? e.message : 'Unknown error'}`);
+      setError(actionErrorMessage('Couldn\'t open the file', e));
       setIsLoading(false);
     }
   }, [router]);
@@ -55,7 +59,7 @@ export default function Home() {
       {/* ── Header (mirrors bloompdf.app) ── */}
       <header className="sticky top-0 z-50 h-[58px] bg-background/85 backdrop-blur-xl border-b border-border">
         <div className="max-w-screen-xl mx-auto h-full px-4 sm:px-6 flex items-center gap-3">
-          <a href={SITE_URL} aria-label="BloomPDF home" className="flex items-center flex-shrink-0 -ml-2 sm:-ml-1 mr-2 sm:mr-4 overflow-visible">
+          <a href={SITE_URL} target="_blank" rel="noopener noreferrer" aria-label="BloomPDF home (opens in a new tab)" className="flex items-center flex-shrink-0 -ml-2 sm:-ml-1 mr-2 sm:mr-4 overflow-visible">
             <Logo variant="nav" />
           </a>
           <span className="hidden sm:inline-flex items-center h-7 px-2.5 rounded-full bg-primary/10 text-primary text-[12px] font-semibold">
@@ -64,6 +68,9 @@ export default function Home() {
           <div className="flex-1" />
           <a
             href={SITE_URL}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="All PDF tools (opens in a new tab)"
             className="h-9 px-3 inline-flex items-center gap-1 rounded-lg text-[13.5px] font-medium text-muted-foreground hover:text-foreground hover:bg-muted/70 transition-colors"
           >
             <span className="hidden sm:inline">All PDF tools</span>
@@ -185,7 +192,7 @@ export default function Home() {
               <div key={f.title} className="rounded-2xl border border-border bg-card p-5 shadow-[0_2px_8px_-2px_rgba(0,0,0,0.06)]">
                 <CategoryIcon id={f.cat} size={18} tile />
                 <h2 className="mt-3 text-[15px] font-bold">{f.title}</h2>
-                <p className="mt-1 text-[13.5px] leading-relaxed text-muted-foreground">{f.body}</p>
+                <p className="mt-1 text-[13.5px] leading-relaxed text-muted-foreground text-pretty">{f.body}</p>
               </div>
             ))}
           </div>
@@ -202,7 +209,7 @@ export default function Home() {
             </a>
           </p>
           <p className="flex items-center gap-1.5">
-            Made with <Lotus size={16} className="text-primary" /> for everyone who just needs their PDF done.
+            Made with <Heart size={14} className="text-primary fill-current shrink-0" role="img" aria-label="love" /> for everyone who just needs their PDF done.
           </p>
         </div>
       </footer>

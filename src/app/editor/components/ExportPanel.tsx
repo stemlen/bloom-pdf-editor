@@ -115,16 +115,26 @@ export function ExportPanel({
     CONVERT_FORMATS.find((f) => f.id === selectedConvert) ?? CONVERT_FORMATS[0]!;
   const formatInfo = EXPORT_FORMATS.find((f) => f.id === selectedFormat)!;
 
-  // Reset + health check when panel opens
+  // Reset when the panel opens (or the page count changes while open).
+  // Done during render rather than in an effect to avoid a cascading render.
+  const openKey = isOpen ? `open|${totalPages}` : 'closed';
+  const [lastOpenKey, setLastOpenKey] = useState(openKey);
+  if (openKey !== lastOpenKey) {
+    setLastOpenKey(openKey);
+    if (isOpen) {
+      setExportDone(false);
+      setExportError(null);
+      setExportProgress(0);
+      setJobLabel(null);
+      setJobProgress(0);
+      setCustomTo(totalPages);
+      setEngineOnline(null);
+    }
+  }
+
+  // Health check while the panel is open
   useEffect(() => {
     if (!isOpen) return;
-    setExportDone(false);
-    setExportError(null);
-    setExportProgress(0);
-    setJobLabel(null);
-    setJobProgress(0);
-    setCustomTo(totalPages);
-    setEngineOnline(null);
     let cancelled = false;
     void checkBloomHealth().then((h) => {
       if (cancelled) return;
@@ -140,10 +150,13 @@ export function ExportPanel({
   useEffect(() => {
     if (!isOpen) return;
     const handleKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key !== 'Escape') return;
+      e.stopPropagation();
+      onClose();
     };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
+    // Capture phase, so editor shortcuts and focused controls can't swallow Escape.
+    window.addEventListener('keydown', handleKey, true);
+    return () => window.removeEventListener('keydown', handleKey, true);
   }, [isOpen, onClose]);
 
   const getPageIndices = useCallback((): number[] | null => {
@@ -201,11 +214,11 @@ export function ExportPanel({
 
   const handleConvertExport = useCallback(async () => {
     if (!getPdfBytes) {
-      setExportError('PDF bytes unavailable — reload the document and try again.');
+      setExportError("The document couldn't be read. Reload it and try again.");
       return;
     }
     if (engineOnline === false) {
-      setExportError('Convert API unavailable — restart the Next.js app (npm run dev).');
+      setExportError("Document conversion isn't available right now. Reload the page and try again.");
       return;
     }
 

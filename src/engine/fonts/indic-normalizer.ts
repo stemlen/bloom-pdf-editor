@@ -458,8 +458,25 @@ export const INDIC_FONT_FALLBACKS = [
   'Utsaah',
   'Lohit Devanagari',
   'FreeSans',
+  // Colour emoji, so pictographs in canvas text don't render blank (BE-205)
+  'Apple Color Emoji',
+  'Segoe UI Emoji',
+  'Noto Color Emoji',
   'sans-serif',
 ].join(', ');
+
+/** Emoji families appended to DOM font stacks (edit overlay, text boxes). */
+export const EMOJI_FONT_FALLBACKS = '"Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji"';
+
+/** True if the text contains an emoji or other pictograph. */
+export function hasEmoji(text: string): boolean {
+  return /\p{Extended_Pictographic}/u.test(text);
+}
+
+/** Number of emoji or other pictographs in the text. */
+export function countEmoji(text: string): number {
+  return text.match(/\p{Extended_Pictographic}/gu)?.length ?? 0;
+}
 
 // ─── Glyph-level & Run-level Indic Repair ───────────────────────────────────
 
@@ -568,7 +585,7 @@ export function repairIndicRuns<T extends IndicRunItem>(runs: T[]): void {
 
     if (!hasIndic) continue;
 
-    run.glyphs = reorderIndicGlyphs(run.glyphs as any) as any;
+    run.glyphs = reorderIndicGlyphs(run.glyphs);
     run.text = normalizeIndicText(run.glyphs.map(g => g.unicode).join(''));
   }
 }

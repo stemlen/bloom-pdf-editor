@@ -5,7 +5,7 @@ test("find text across pages, replace one match, then replace all", async ({ pag
   const errors = trackErrors(page);
   await openInEditor(page);
   await page.keyboard.press("ControlOrMeta+f");
-  const find = page.getByPlaceholder("Search text in PDF...");
+  const find = page.getByPlaceholder("Search text in PDF…");
   await expect(find).toBeFocused();
   await find.fill("the");
   const count = page.getByTestId("match-count");
@@ -30,7 +30,7 @@ test("find text across pages, replace one match, then replace all", async ({ pag
   await find.fill("Bloom");
   await page.getByPlaceholder("Replace with...").fill("Blossom");
   await page.getByRole("button", { name: "Replace All" }).click();
-  await expect(count).toHaveText("0");
+  await expect(count).toHaveText("No matches");
   await expect(page.getByTestId("unsaved-badge")).toBeVisible();
 
   const { bytes } = await downloadPdf(page);
@@ -45,7 +45,7 @@ test("find text across pages, replace one match, then replace all", async ({ pag
 test("match case toggle", async ({ page }) => {
   await openInEditor(page);
   await page.getByRole("button", { name: "Toggle Find & Replace" }).click();
-  const find = page.getByPlaceholder("Search text in PDF...");
+  const find = page.getByPlaceholder("Search text in PDF…");
   await find.fill("bloom");
   const count = page.getByTestId("match-count");
   await expect(count).toHaveText(/^1\/[2-9]$/);
@@ -57,12 +57,12 @@ test("OCR adds a searchable text layer", async ({ page }) => {
   test.setTimeout(180_000);
   await openInEditor(page);
   await page.getByRole("button", { name: "Toggle Find & Replace" }).click();
-  const find = page.getByPlaceholder("Search text in PDF...");
+  const find = page.getByPlaceholder("Search text in PDF…");
   await find.fill("Garden");
   await expect(page.getByTestId("match-count")).toHaveText("1/1");
   // Needs the tesseract.js worker + English data from the jsDelivr CDN.
   const ocrLog = page.waitForEvent("console", { predicate: (m) => /\[OCR\] Inserted/.test(m.text()), timeout: 150_000 });
-  await page.getByTitle("OCR recognize text").click();
+  await page.getByTestId("search-ocr-button").click();
   await ocrLog;
   await expect(page.getByTestId("unsaved-badge")).toBeVisible();
   // The recognised words are now a second, invisible text layer.

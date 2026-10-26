@@ -50,10 +50,22 @@ export function detectColumnSplitIndices(runs: TextRun[], fontSize: number): num
   // Table cells / multi-column rows have gutters >= max(fontSize * 1.2, avgCharW * 2.4, 9).
   const columnMin = Math.max(fontSize * 1.2, avgCharW * 2.4, 9);
 
+  // Tight tables (narrow cells, numbers in their own text objects) can have
+  // gutters under that limit. A gap of most of an em with no space glyph on
+  // either side is still not a word space, so it splits too.
+  const tightMin = Math.max(fontSize * 0.8, avgCharW * 1.6, 6);
+  const isSpace = (ch: string | undefined) => ch === ' ' || ch === '\u00A0';
+
   const splits: number[] = [];
   for (let i = 0; i < runs.length - 1; i++) {
     const gap = gapBetweenRuns(runs[i], runs[i + 1]);
-    if (gap >= columnMin) splits.push(i);
+    if (gap >= columnMin) {
+      splits.push(i);
+      continue;
+    }
+    const leftEnd = runs[i].glyphs[runs[i].glyphs.length - 1]?.unicode;
+    const rightStart = runs[i + 1].glyphs[0]?.unicode;
+    if (gap >= tightMin && !isSpace(leftEnd) && !isSpace(rightStart)) splits.push(i);
   }
   return splits;
 }

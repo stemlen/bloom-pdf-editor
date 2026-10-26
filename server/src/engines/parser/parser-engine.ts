@@ -71,9 +71,13 @@ function extractMetadata(
   const meta: RawDocumentMetadata = { pdfVersion: version };
   if (!info) return meta;
 
+  // Empty values and generator placeholders such as ReportLab's "(anonymous)"
+  // and "(unspecified)" carry no information; leave them out.
   const str = (key: string): string | undefined => {
     const v = info.get(key);
-    return typeof v === 'string' ? v : undefined;
+    if (typeof v !== 'string') return undefined;
+    const t = v.trim();
+    return t === '' || /^\((anonymous|unspecified|unknown|none)\)$/i.test(t) ? undefined : t;
   };
 
   meta.title = str('Title');

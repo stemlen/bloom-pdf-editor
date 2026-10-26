@@ -246,8 +246,8 @@ export function writeDocument(udm: UnifiedDocumentModel): DocumentWriteResult {
         if (!item || !('text' in item)) continue;
         const text = String(item.text ?? '');
         // Use runsFromNode to preserve bold/italic/color formatting within list items
-        const itemRuns = 'runs' in item && (item as any).runs?.length
-          ? runsFromNode(item as any)
+        const itemRuns = 'runs' in item && item.runs?.length
+          ? runsFromNode(item)
           : runText(text);
         if (isFirst && needsPageBreak) {
           // Emit a page-break paragraph before the first list item

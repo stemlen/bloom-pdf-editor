@@ -42,6 +42,12 @@ export interface AcroFormWidget {
   exportValue: string | null;
   /** Selected appearance state name (/AS). */
   appearanceState: string | null;
+  /** For Btn: the widget's "on" appearance state (the non-Off key of /AP /N). */
+  onState: string | null;
+  /** For Ch: display options from /Opt (own or inherited). */
+  options: string[];
+  /** For Tx: multiline flag (Ff bit 13). */
+  multiline: boolean;
 }
 
 /** Parsed AcroForm catalog entry. */

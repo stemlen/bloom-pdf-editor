@@ -18,6 +18,7 @@ import {
   type CharSpec,
 } from './helpers/raw-fixtures.js';
 import { borderlessGrid2x3Chars } from './helpers/table-fixtures.js';
+import type { SemanticNode } from '../engines/semantic/types.js';
 
 async function buildUdm(chars: CharSpec[]) {
   const raw = buildRawDocument([buildPage({ chars })]);
@@ -148,7 +149,7 @@ describe('Phase 11 — DOCX Export Engine', () => {
       width: 200,
       height: 100,
       resourceId: 'img_resource_1',
-    } as any;
+    } as unknown as SemanticNode;
     udm.semantic.readingOrder.push(imageNodeId);
 
     // Add image to store
@@ -270,7 +271,7 @@ describe('Phase 11 — DOCX Export Engine', () => {
     const nodes = Object.values(udm.semantic.nodes);
     const textNodes = nodes.filter((n) => 'text' in n && n.type !== 'document');
     if (textNodes.length >= 2) {
-      (textNodes[1] as any).pageIndex = 1;
+      textNodes[1].pageIndex = 1;
     }
 
     const result = await new DocxExporter().export(udm);

@@ -1,16 +1,14 @@
 /**
- * Phase 9 — PKCS#12 / PFX import (best-effort, browser WebCrypto).
+ * Phase 9 — PKCS#12 / PFX import (browser WebCrypto).
  *
- * Supports:
- * - Unencrypted authSafe data bags (certs + PKCS8 keys)
- * - Node.js `crypto.pkcs12` path when available (full password decrypt)
- *
- * Encrypted browser P12 without Node falls back with a clear error
- * directing users to PEM export (openssl pkcs12 -nodes).
+ * Supports unencrypted bags and password-protected files that use PBES2
+ * (PBKDF2 + AES), the default of OpenSSL 3, macOS and current Windows.
+ * Legacy Triple DES / RC2 encryption is reported with a clear message.
  */
 
 import { parseDERNode, decodeOID } from '../crypto/signature-verify';
 import type { ASN1Node } from '../crypto/types';
+import { decryptPkcs12, encodeNode, octets, Pkcs12PasswordError } from './pkcs12-decrypt';
 import {
   importPrivateKey,
   parseCertificateDer,
@@ -50,6 +48,7 @@ async function walkSafeBags(
   node: ASN1Node,
   certificates: CertificateInfo[],
   keys: ImportedKeyMaterial[],
+  password = '',
 ): Promise<void> {
   const oid = nodeOIDLocal(node.children?.[0]);
   if (oid === OID_CERT_BAG) {
@@ -68,43 +67,34 @@ async function walkSafeBags(
       }
     }
   } else if (oid === OID_KEY_BAG) {
+    // keyBag [0] EXPLICIT PrivateKeyInfo (PKCS#8)
     const bagValue = node.children?.find((c) => c.class === 'context');
-    const keyDer = bagValue?.children?.[0]
-      ? encodeNodeApprox(bagValue.children[0])
-      : findOctetString(bagValue ?? node);
-    if (keyDer) {
+    const pkcs8 = bagValue?.children?.[0];
+    if (pkcs8) {
       try {
-        keys.push(await importPrivateKey(keyDer));
+        keys.push(await importPrivateKey(encodeNode(pkcs8)));
       } catch {
-        // shrouded or unsupported
+        // unsupported key type
       }
     }
+    return;
   } else if (oid === OID_PKCS8_SHROUDED) {
-    // Encrypted private key — needs password decrypt (not in pure browser without PBES)
-    // Skip here; Node path handles it.
+    // pkcs8ShroudedKeyBag [0] EXPLICIT EncryptedPrivateKeyInfo { algorithm, encryptedData }
+    const info = node.children?.find((c) => c.class === 'context')?.children?.[0];
+    const algorithm = info?.children?.[0];
+    const encrypted = info?.children?.[1];
+    if (algorithm && encrypted) {
+      const pkcs8 = await decryptPkcs12(algorithm, octets(encrypted), password);
+      keys.push(await importPrivateKey(pkcs8));
+    }
+    return;
   }
 
   if (node.children) {
     for (const c of node.children) {
-      await walkSafeBags(c, certificates, keys);
+      await walkSafeBags(c, certificates, keys, password);
     }
   }
-}
-
-/** Re-encode a parsed node to DER (minimal) for key import when we have children. */
-function encodeNodeApprox(node: ASN1Node): Uint8Array | null {
-  // If it's already an OCTET STRING of PKCS8, use content
-  if (node.tag === 0x04) return node.content;
-  // SEQUENCE — reconstruct is complex; use raw slice if offset/length known
-  if (node.offset != null && node.length != null) {
-    // We don't have the original buffer here
-  }
-  // Walk to find PKCS8 SEQUENCE starting with INTEGER version
-  if (node.tag === 0x30 && node.children && node.children.length >= 2) {
-    // Can't easily re-encode without a DER writer — try octet
-    return findOctetString(node);
-  }
-  return findOctetString(node);
 }
 
 /**
@@ -156,9 +146,8 @@ export async function importPkcs12(
 
   if (contentType === OID_ENCRYPTED_DATA) {
     throw new Error(
-      'This PFX/P12 uses encrypted authSafe. In the browser, export to PEM instead:\n' +
-        '  openssl pkcs12 -in file.p12 -nodes -out file.pem\n' +
-        'then import the PEM file.',
+      'This certificate file is encrypted for a specific recipient, which Bloom can’t open. ' +
+        'Export it as a password-protected P12 or as PEM instead.',
     );
   }
 
@@ -170,7 +159,8 @@ export async function importPkcs12(
       try {
         const safe = parseDERNode(oct, 0);
         // authenticatedSafe ::= SEQUENCE OF ContentInfo
-        const bags = safe.tag === 0x30 && safe.children ? safe.children : [safe];
+        // Tags are stored without the constructed bit: SEQUENCE is 0x10.
+        const bags = safe.tag === 0x10 && safe.children ? safe.children : [safe];
         for (const bag of bags) {
           const bagType = nodeOIDLocal(bag.children?.[0]);
           if (bagType === OID_DATA || !bagType) {
@@ -180,21 +170,28 @@ export async function importPkcs12(
             if (bagOct) {
               try {
                 const safeContents = parseDERNode(bagOct, 0);
-                await walkSafeBags(safeContents, certificates, keys);
-              } catch {
-                await walkSafeBags(bag, certificates, keys);
+                await walkSafeBags(safeContents, certificates, keys, password);
+              } catch (e) {
+                if (e instanceof Pkcs12PasswordError) throw e;
+                await walkSafeBags(bag, certificates, keys, password);
               }
             }
           } else if (bagType === OID_ENCRYPTED_DATA) {
-            throw new Error(
-              'P12 contains encrypted safe bags. Export to PEM with openssl pkcs12 -nodes.',
-            );
+            // [0] EXPLICIT EncryptedData { version, EncryptedContentInfo { type, algorithm, [0] IMPLICIT content } }
+            const encryptedData = bag.children?.find((c) => c.class === 'context')?.children?.[0];
+            const eci = encryptedData?.children?.[1];
+            const algorithm = eci?.children?.[1];
+            const content = eci?.children?.find((c) => c.class === 'context');
+            if (algorithm && content) {
+              const plain = await decryptPkcs12(algorithm, octets(content), password);
+              await walkSafeBags(parseDERNode(plain, 0), certificates, keys, password);
+            }
           } else {
             await walkSafeBags(bag, certificates, keys);
           }
         }
       } catch (e) {
-        if (e instanceof Error && e.message.includes('openssl')) throw e;
+        if (e instanceof Pkcs12PasswordError || (e instanceof Error && /encryption|password/i.test(e.message))) throw e;
         // Try walking entire tree for cert OCTET STRINGs that look like certs
         await walkSafeBags(root, certificates, keys);
       }
@@ -208,14 +205,9 @@ export async function importPkcs12(
 
   if (certificates.length === 0 && keys.length === 0) {
     throw new Error(
-      'No certificates or keys found in PFX/P12. ' +
-        (password
-          ? 'Password may be wrong, or bags are encrypted — export to PEM.'
-          : 'Try a password, or export to PEM with openssl pkcs12 -nodes.'),
+      'No certificate or private key was found in this file. Check that it is a .p12 or .pfx certificate file.',
     );
   }
-
-  void password; // reserved for future PBES2 decrypt
 
   return {
     certificates,

@@ -165,6 +165,7 @@ export async function renderPageToCanvas(
   // Register embedded fonts in the browser
   if (typeof window !== 'undefined') {
     await registerEmbeddedFonts(fonts);
+    await prepareType3Images(fonts, objects);
   }
 
   const flowDraw = buildFlowDrawIndex(documentFlow.lines, fonts);
@@ -213,16 +214,32 @@ export async function renderPageToCanvas(
       // appearance streams to avoid rendering text twice on top of itself.
       const subtype = annotDict.get('Subtype');
       const subtypeName = subtype instanceof PDFName ? subtype.name : '';
-      if (subtypeName === 'Link' || subtypeName === 'Widget') continue;
-      
+      if (subtypeName === 'Link') continue;
+      // Signature widgets stay as before: the editor draws placed signatures itself.
+      if (subtypeName === 'Widget') {
+        const parentObj = resolveRef(annotDict.get('Parent') as PDFRef, objects);
+        const ft = annotDict.get('FT') ?? (parentObj instanceof PDFDict ? parentObj.get('FT') : undefined);
+        if (ft instanceof PDFName && ft.name === 'Sig') continue;
+      }
+      // Hidden (F bit 2) and NoView (F bit 6) annotations aren't drawn.
+      const flagsObj = annotDict.get('F');
+      const annotFlags = flagsObj instanceof PDFNumber ? flagsObj.value : 0;
+      if (annotFlags & 0b100010) continue;
+
       const apRef = annotDict.get('AP');
       let apDict = apRef;
       if (apRef instanceof PDFRef) apDict = resolveRef(apRef, objects);
-      
+
       if (apDict instanceof PDFDict) {
         const nRef = apDict.get('N');
         let nStream = nRef;
         if (nRef instanceof PDFRef) nStream = resolveRef(nRef, objects);
+        // Check boxes and radio buttons keep one appearance per state; /AS picks it.
+        if (nStream instanceof PDFDict && !(nStream instanceof PDFStream)) {
+          const asObj = annotDict.get('AS');
+          const state = asObj instanceof PDFName ? nStream.get(asObj.name) : undefined;
+          nStream = state instanceof PDFRef ? resolveRef(state, objects) : state;
+        }
         
         if (nStream instanceof PDFStream) {
           // Interpret this Appearance stream
@@ -247,6 +264,7 @@ export async function renderPageToCanvas(
           const annotFonts = loadPageFonts(mockPage.resources, objects);
           if (typeof window !== 'undefined') {
             await registerEmbeddedFonts(annotFonts);
+            await prepareType3Images(annotFonts, objects);
           }
           
           ctx.save();
@@ -290,7 +308,7 @@ export async function renderPageToCanvas(
           if (!mappedToRect) {
             const streamMatrix = nStream.dict.get('Matrix');
             if (streamMatrix instanceof PDFArray && streamMatrix.items.length === 6) {
-              const m = streamMatrix.items.map((e: any) => (e as PDFNumber).value);
+              const m = streamMatrix.items.map((e) => (e as PDFNumber).value);
               ctx.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
             } else if (rectObj instanceof PDFArray && rectObj.items.length >= 4) {
               const x = (rectObj.items[0] as PDFNumber).value;
@@ -441,6 +459,7 @@ async function renderSoftMaskGroup(
   const formFonts = loadPageFonts(formResources, objects);
   if (typeof window !== 'undefined') {
     await registerEmbeddedFonts(formFonts);
+    await prepareType3Images(formFonts, objects);
   }
 
   rgbCtx.beginPath();
@@ -812,7 +831,7 @@ function drawTextRunAtPositions(
   });
 }
 
-import { drawType3Glyph, type3CharName } from './type3';
+import { drawType3Glyph, prepareType3Images, type3CharName } from './type3';
 
 function drawTextRun(
   ctx: CanvasRenderingContext2D,
@@ -1212,7 +1231,14 @@ function getCanvasFontProperties(
       // on top synthesizes extra stroke and breaks measureText vs PDF Widths
       // (classic Acrobat vs canvas mismatch). Only use CSS weight when the
       // FontFace failed to load and we fall back to a system family.
-      let fallback = `serif, ${INDIC_FONT_FALLBACKS}`;
+      // FontDescriptor /Flags: bit 1 FixedPitch, bit 2 Serif. A face that says
+      // it is neither (e.g. Mukta) falls back to a sans family, so glyphs the
+      // subset lacks don't switch to a serif face mid-word (BE-207).
+      const flags = fontData.flags;
+      const declaredSans = flags !== undefined && (flags & 0b11) === 0;
+      let fallback = declaredSans
+        ? `Helvetica, Arial, sans-serif, ${INDIC_FONT_FALLBACKS}`
+        : `serif, ${INDIC_FONT_FALLBACKS}`;
       if (lower.includes('courier') || lower.includes('mono') || lower.includes('cumberland')) {
         fallback = `"Courier New", Courier, monospace, ${INDIC_FONT_FALLBACKS}`;
       } else if (lower.includes('helv') || lower.includes('arial') || lower.includes('sans') || lower.includes('albany')) {
@@ -1540,6 +1566,7 @@ async function drawFormXObject(
 
   const formInterpreted = interpretPage(formStream.getBytes(), formPageMock, objects);
   const formFonts = loadPageFonts(formResources, objects);
+  if (typeof window !== 'undefined') await prepareType3Images(formFonts, objects);
 
   const renderPaths = options.renderPaths ?? true;
   const renderText = options.renderText ?? true;

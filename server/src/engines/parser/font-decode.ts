@@ -252,7 +252,7 @@ function parseCidWidths(
     }
     const next = w.get(i + 1);
     if (next instanceof PdfArray || (next instanceof PdfRef && resolve(objects, next) instanceof PdfArray)) {
-      let arr = next instanceof PdfArray ? next : (resolve(objects, next as PdfRef) as PdfArray);
+      const arr = next instanceof PdfArray ? next : (resolve(objects, next as PdfRef) as PdfArray);
       for (let j = 0; j < arr.length; j++) {
         const wv = arr.get(j);
         if (typeof wv === 'number') widths.set(c1 + j, wv);

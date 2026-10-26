@@ -14,8 +14,10 @@ import {
   Combine,
   Maximize2,
   Minimize2,
+  Files,
 } from 'lucide-react';
 import * as Tooltip from '@radix-ui/react-tooltip';
+import { confirmDialog } from './ConfirmDialog';
 
 interface ThumbnailsSidebarProps {
   totalPages: number;
@@ -62,9 +64,12 @@ function IconTip({
   );
 }
 
+const PAGE_ACTION_CLASS =
+  'flex items-center justify-center gap-1.5 py-1.5 px-2 rounded-md border border-app bg-panel-elevated text-app text-[11px] font-semibold hover:bg-panel-elevated/80 disabled:opacity-40 disabled:pointer-events-none transition-colors';
+
 const PAGE_CAPABILITIES = [
   { id: 'split', icon: Scissors, label: 'Split pages', color: 'text-contrast', steps: 'Remove unwanted pages using the trash icon, then click Download to save the new PDF.' },
-  { id: 'merge', icon: Combine, label: 'Merge PDFs', color: 'text-contrast', steps: 'Hover between pages and click the "Insert from PDF" icon to append another file, then Download.' },
+  { id: 'merge', icon: Combine, label: 'Merge PDFs', color: 'text-contrast', steps: 'Click Merge PDF to add another file at the end, or hover between pages and use "Insert from PDF", then Download.' },
   { id: 'blank', icon: FilePlus, label: 'Add blank page', color: 'text-app-muted', steps: 'Hover between pages and click the "Add blank page" icon to insert an empty page.' },
   { id: 'insert', icon: FileText, label: 'Insert from PDF', color: 'text-app-muted', steps: 'Hover between pages and click the "Insert from PDF" icon to append pages.' },
   { id: 'reorder', icon: GripVertical, label: 'Re-order pages', color: 'text-app-muted', steps: 'Click and drag any page thumbnail to move it to a new position in the document.' },
@@ -135,25 +140,20 @@ export function ThumbnailsSidebar({
     onReorderPages?.(from, toIndex);
   };
 
-  const InsertBar = ({
-    insertAt,
-    rotatePageIndex,
-  }: {
-    insertAt: number;
-    rotatePageIndex: number;
-  }) => (
+  // Plain render helper (not a component) so the bar isn't remounted on every render.
+  const renderInsertBar = (insertAt: number, rotatePageIndex: number) => (
     <div
       className={`group/bar relative flex justify-center z-20 ${isExpanded ? 'flex-col px-1 h-auto self-stretch' : 'py-1 w-full'}`}
       onDragOver={(e) => {
-        if (dragIndexRef.current == null) return;
+        if (dragIndex == null) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = 'move';
-        setDropTarget(insertAt > (dragIndexRef.current ?? -1) ? insertAt - 1 : insertAt);
+        setDropTarget(insertAt > dragIndex ? insertAt - 1 : insertAt);
       }}
       onDrop={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        const from = dragIndexRef.current;
+        const from = dragIndex;
         if (from == null) return;
         const to = insertAt > from ? insertAt - 1 : insertAt;
         clearDrag();
@@ -305,14 +305,61 @@ export function ThumbnailsSidebar({
             </Tooltip.Root>
           </div>
 
+          {(onMergePdf || onSplitCurrentPage || onSplitAllPages || onRemoveCurrentPage) && (
+            <div className={`grid grid-cols-2 gap-1.5 w-full ${isExpanded ? 'max-w-md' : ''}`} data-testid="page-actions">
+              {onMergePdf && (
+                <button
+                  type="button"
+                  onClick={() => mergeInputRef.current?.click()}
+                  className={PAGE_ACTION_CLASS}
+                  title="Add all pages of another PDF at the end"
+                >
+                  <Combine size={12} /> Merge PDF
+                </button>
+              )}
+              {onSplitCurrentPage && (
+                <button
+                  type="button"
+                  onClick={onSplitCurrentPage}
+                  className={PAGE_ACTION_CLASS}
+                  title="Download this page as its own PDF"
+                >
+                  <Scissors size={12} /> Split Page
+                </button>
+              )}
+              {onSplitAllPages && (
+                <button
+                  type="button"
+                  onClick={onSplitAllPages}
+                  disabled={totalPages < 2}
+                  className={PAGE_ACTION_CLASS}
+                  title="Download every page as a separate PDF"
+                >
+                  <Files size={12} /> Split All
+                </button>
+              )}
+              {onRemoveCurrentPage && (
+                <button
+                  type="button"
+                  onClick={onRemoveCurrentPage}
+                  disabled={totalPages < 2}
+                  className={`${PAGE_ACTION_CLASS} hover:text-red-500`}
+                  title={totalPages < 2 ? 'A PDF needs at least one page' : `Remove page ${currentPage + 1}`}
+                >
+                  <Trash2 size={12} /> Remove Page
+                </button>
+              )}
+            </div>
+          )}
+
           {!isGeneratingThumbnails && thumbnails.length > 0 && (
-            <InsertBar insertAt={0} rotatePageIndex={0} />
+            renderInsertBar(0, 0)
           )}
 
           {isGeneratingThumbnails && thumbnails.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-8 gap-3 text-app-faint">
               <Loader2 size={20} className="animate-spin" />
-              <span className="text-[10px] font-medium">Generating...</span>
+              <span className="text-[10px] font-medium">Generating thumbnails…</span>
             </div>
           ) : (
             thumbnails.map((thumbDataUrl, i) => {
@@ -393,9 +440,14 @@ export function ThumbnailsSidebar({
                           className="absolute top-2 right-2 bg-red-500/90 text-white p-1 rounded-md opacity-0 group-hover:opacity-100 transition-all shadow-md hover:bg-red-500 hover:scale-110 z-20"
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (window.confirm('Do you really want to delete this page?')) {
-                              onDeletePage?.(i);
-                            }
+                            void confirmDialog({
+                              title: `Delete page ${i + 1}?`,
+                              description: 'The page and everything on it will be removed from this document.',
+                              confirmLabel: 'Delete page',
+                              destructive: true,
+                            }).then((ok) => {
+                              if (ok) onDeletePage?.(i);
+                            });
                           }}
                         >
                           <Trash2 size={12} />
@@ -434,7 +486,7 @@ export function ThumbnailsSidebar({
                     </div>
                   </div>
 
-                  <InsertBar insertAt={i + 1} rotatePageIndex={i} />
+                  {renderInsertBar(i + 1, i)}
                 </React.Fragment>
               );
             })

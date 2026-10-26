@@ -82,6 +82,8 @@ export interface FontData {
   fontMatrix?: number[] | null;
   /** Type 3 Character Procedures: charName → PDFStream */
   charProcs?: Map<string, PDFStream> | null;
+  /** Type 3 image XObjects named in the font's /Resources (colour emoji glyphs) */
+  type3Images?: Map<string, PDFStream> | null;
 }
 
 // ─── Main font loading function ─────────────────────────────────────────────
@@ -209,6 +211,22 @@ export function loadFont(
         const stream = resolveRef(streamRef, objects);
         if (stream instanceof PDFStream) {
           fontData.charProcs.set(charName, stream);
+        }
+      }
+    }
+    // Colour emoji are often Type3 glyphs that paint an image from the
+    // font's own /Resources (e.g. Chrome's PDF output), BE-205.
+    const fontRes = dict.get('Resources');
+    const fontResDict = fontRes ? resolveRef(fontRes, objects) : undefined;
+    const xobjRaw = fontResDict instanceof PDFDict ? fontResDict.get('XObject') : undefined;
+    const xobjDict = xobjRaw ? resolveRef(xobjRaw, objects) : undefined;
+    if (xobjDict instanceof PDFDict) {
+      for (const [name, ref] of xobjDict.entries()) {
+        const stream = resolveRef(ref, objects);
+        const sub = stream instanceof PDFStream ? stream.dict.get('Subtype') : undefined;
+        if (stream instanceof PDFStream && sub instanceof PDFName && sub.name === 'Image') {
+          if (!fontData.type3Images) fontData.type3Images = new Map();
+          fontData.type3Images.set(name, stream);
         }
       }
     }
@@ -493,8 +511,8 @@ function loadDescendantFont(
         }
       }
     }
-  } else if (!cidToGidRef || (cidToGidRef as any instanceof PDFName && (cidToGidRef as any).name === 'Identity')) {
-    // If CIDToGIDMap is /Identity, CID = GID (no mapping needed)
+  } else {
+    // No CIDToGIDMap: treat it as /Identity (CID = GID, no mapping needed).
     // Populate widths directly from TrueType font for all CIDs if W array was missing or incomplete
     if (fontData.ttfFont && fontData.widths.size === 0) {
       const numGlyphs = fontData.ttfFont.numGlyphs;

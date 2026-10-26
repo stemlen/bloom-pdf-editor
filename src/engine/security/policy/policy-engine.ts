@@ -15,6 +15,7 @@ import { sanitizationEngine } from '../sanitization/sanitization-engine';
 import { javaScriptSecurityEngine } from '../javascript/javascript-engine';
 import { embeddedFileSecurityEngine } from '../embedded-files/embedded-file-engine';
 import { metadataEngine } from '../metadata/metadata-engine';
+import { generateStrongPassword } from '../password/generate';
 
 export interface SecurityPolicy {
   name: string;
@@ -25,6 +26,15 @@ export interface SecurityPolicy {
   removeJavaScript?: boolean;
   removeAttachments?: boolean;
   permissions?: Partial<PdfPermissions>;
+  /** The policy encrypts with an open password, which the user must supply. */
+  requireUserPassword?: boolean;
+}
+
+/** Result of applying a policy. `ownerPassword` is set when one was generated. */
+export interface PolicyApplyResult {
+  doc: PDFDocumentData;
+  ownerPassword?: string;
+  generatedOwnerPassword: boolean;
 }
 
 const BUILTIN: SecurityPolicy[] = [
@@ -35,7 +45,7 @@ const BUILTIN: SecurityPolicy[] = [
     encryption: {
       algorithm: 'AES-256',
       userPassword: '',
-      ownerPassword: 'owner',
+      ownerPassword: '',
       permissions: {
         ...DEFAULT_PERMISSIONS,
         modify: false,
@@ -54,12 +64,13 @@ const BUILTIN: SecurityPolicy[] = [
   },
   {
     name: 'Confidential',
+    requireUserPassword: true,
     description: 'AES-256, no copy, strip metadata',
     requireEncryption: true,
     encryption: {
       algorithm: 'AES-256',
-      userPassword: 'confidential',
-      ownerPassword: 'owner',
+      userPassword: '',
+      ownerPassword: '',
       permissions: { ...DEFAULT_PERMISSIONS, copy: false, modify: false },
     },
     stripMetadata: true,
@@ -68,12 +79,13 @@ const BUILTIN: SecurityPolicy[] = [
   },
   {
     name: 'Highly Confidential',
+    requireUserPassword: true,
     description: 'Strong encryption, no print/copy/modify, sanitize',
     requireEncryption: true,
     encryption: {
       algorithm: 'AES-256',
-      userPassword: 'secret',
-      ownerPassword: 'owner',
+      userPassword: '',
+      ownerPassword: '',
       permissions: {
         print: false,
         printHighQuality: false,
@@ -91,12 +103,13 @@ const BUILTIN: SecurityPolicy[] = [
   },
   {
     name: 'Encrypted Archive',
+    requireUserPassword: true,
     description: 'AES-256 archive with passwords',
     requireEncryption: true,
     encryption: {
       algorithm: 'AES-256',
-      userPassword: 'archive',
-      ownerPassword: 'owner',
+      userPassword: '',
+      ownerPassword: '',
     },
   },
   {
@@ -106,7 +119,7 @@ const BUILTIN: SecurityPolicy[] = [
     encryption: {
       algorithm: 'AES-128',
       userPassword: '',
-      ownerPassword: 'owner',
+      ownerPassword: '',
       permissions: { ...DEFAULT_PERMISSIONS, print: false, printHighQuality: false },
     },
   },
@@ -117,7 +130,7 @@ const BUILTIN: SecurityPolicy[] = [
     encryption: {
       algorithm: 'AES-128',
       userPassword: '',
-      ownerPassword: 'owner',
+      ownerPassword: '',
       permissions: { ...DEFAULT_PERMISSIONS, copy: false },
     },
   },
@@ -176,9 +189,15 @@ export class SecurityPolicyEngine implements ISecurityPolicyEngine {
     doc: PDFDocumentData,
     name: string,
     passwordOverrides?: { userPassword?: string; ownerPassword?: string },
-  ): Promise<PDFDocumentData> {
+  ): Promise<PolicyApplyResult> {
     const policy = this.getPolicy(name);
     if (!policy) throw new Error(`Unknown security policy: ${name}`);
+
+    const willEncrypt = !!(policy.requireEncryption && policy.encryption && !isEncryptedTrailer(doc.xref.trailerDict));
+    const userPassword = passwordOverrides?.userPassword || policy.encryption?.userPassword || '';
+    if (willEncrypt && policy.requireUserPassword && !userPassword) {
+      throw new Error(`The ${name} policy needs an open password. Enter one in the Open password field.`);
+    }
 
     if (policy.stripMetadata || policy.removeJavaScript || policy.removeAttachments) {
       await sanitizationEngine.sanitize(doc, {
@@ -196,16 +215,19 @@ export class SecurityPolicyEngine implements ISecurityPolicyEngine {
       }
     }
 
-    if (policy.requireEncryption && policy.encryption && !isEncryptedTrailer(doc.xref.trailerDict)) {
+    if (willEncrypt && policy.encryption) {
+      const supplied = passwordOverrides?.ownerPassword || policy.encryption.ownerPassword;
+      const ownerPassword = supplied || generateStrongPassword();
       await encryptDocumentObjects(doc, {
         ...policy.encryption,
-        userPassword: passwordOverrides?.userPassword ?? policy.encryption.userPassword,
-        ownerPassword: passwordOverrides?.ownerPassword ?? policy.encryption.ownerPassword,
+        userPassword,
+        ownerPassword,
         permissions: policy.encryption.permissions ?? policy.permissions,
       });
+      return { doc, ownerPassword, generatedOwnerPassword: !supplied };
     }
 
-    return doc;
+    return { doc, generatedOwnerPassword: false };
   }
 
   private loadFromStorage(): void {

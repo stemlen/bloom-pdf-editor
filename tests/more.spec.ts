@@ -112,7 +112,7 @@ test.describe("text & tables", () => {
     await page.keyboard.press("ControlOrMeta+a");
     const panel = page.getByTestId("options-panel");
     await panel.locator("select").first().selectOption("Times New Roman");
-    await panel.getByRole("button", { name: "Text colour #3b82f6" }).click();
+    await panel.getByRole("button", { name: "Text color #3B82F6" }).click();
     await panel.getByRole("button", { name: "Align center" }).click();
     await expect(panel.getByRole("button", { name: "Align center" })).toHaveAttribute("aria-pressed", "true");
     await page.getByLabel("Edit line").focus();
@@ -129,14 +129,14 @@ test.describe("links", () => {
     const at = await pdfPoint(page, 120, 670);
     await page.mouse.click(at.x, at.y);
     await page.keyboard.press("ControlOrMeta+a");
-    await page.getByRole("button", { name: "Add link to selection" }).click();
+    await page.getByRole("button", { name: "Add Link to Selection" }).click();
     await page.getByPlaceholder("https://example.com").fill("https://bloompdf.app/one");
     await page.getByRole("button", { name: "Save" }).click();
     // Finish editing the line (link hovering is paused while a line is open).
     const blank = await pdfPoint(page, 500, 120);
     await page.mouse.click(blank.x, blank.y);
     await expect(page.getByLabel("Edit line")).toHaveCount(0);
-    await page.getByRole("button", { name: /Scan for links|Links highlighted/ }).click();
+    await page.getByRole("button", { name: /Scan for Links|Links? Highlighted|No Links on This Page/ }).click();
 
     const popover = page.locator("[data-link-popover]");
     // The popover opens after hovering a link for a moment.
@@ -222,8 +222,8 @@ test.describe("signatures", () => {
     await dialog.getByRole("button", { name: "Done" }).click();
     await page.getByRole("button", { name: "Digitally sign document" }).click();
     await expect(page.getByText("#1 Bloom Test Signer")).toBeVisible({ timeout: 30_000 });
-    await page.getByRole("button", { name: "Enable LTV (embed DSS)" }).click();
-    await expect(page.getByText(/LTV not enabled/)).toHaveCount(0);
+    await page.getByRole("button", { name: "Enable long-term validation" }).click();
+    await expect(page.getByText(/Long-term validation is off/)).toHaveCount(0);
     const { bytes } = await downloadPdf(page);
     expect(Buffer.from(bytes).toString("latin1")).toContain("/DSS");
   });
@@ -248,7 +248,7 @@ test.describe("watermark & security extras", () => {
     const panel = page.getByTestId("security-panel");
     await panel.getByRole("button", { name: "Protect", exact: true }).click();
     await panel.getByPlaceholder("Optional open password").fill("tulip42");
-    await panel.getByPlaceholder("Required for permissions").fill("owner42");
+    await panel.getByPlaceholder("Leave blank to generate a strong one").first().fill("owner42");
     await panel.getByRole("button", { name: "Encrypt PDF" }).click();
     await expect(panel.getByText("Document encrypted")).toBeVisible();
     await panel.getByRole("button", { name: "Remove encryption" }).click();

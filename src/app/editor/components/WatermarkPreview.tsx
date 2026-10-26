@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { PDFDocumentData } from '@/engine';
+import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
 
 interface WatermarkPreviewProps {
   doc: PDFDocumentData | null;
@@ -29,16 +30,19 @@ export function WatermarkPreview({
   watermarkImageDims, watermarkImageFile, watermarkShapeType, watermarkShapeColor,
   watermarkBlendMode,
 }: WatermarkPreviewProps) {
-  const [imgUrl, setImgUrl] = useState<string | null>(null);
+  const [objectUrl, setObjectUrl] = useState<string | null>(null);
 
   useEffect(() => {
-    if (watermarkType === 'image' && watermarkImageFile) {
-      const url = URL.createObjectURL(watermarkImageFile);
-      setImgUrl(url);
-      return () => URL.revokeObjectURL(url);
-    }
-    setImgUrl(null);
-  }, [watermarkType, watermarkImageFile]);
+    if (!watermarkImageFile) return;
+    // An object URL is an external resource that must be revoked, so it is
+    // created and released here and mirrored into state for rendering.
+    const url = URL.createObjectURL(watermarkImageFile);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setObjectUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [watermarkImageFile]);
+
+  const imgUrl = watermarkType === 'image' && watermarkImageFile ? objectUrl : null;
 
   if (!doc || !doc.pages[currentPage]) return null;
 
@@ -49,13 +53,18 @@ export function WatermarkPreview({
   const pageWidth = isRotated ? page.mediaBox.height : page.mediaBox.width;
   const pageHeight = isRotated ? page.mediaBox.width : page.mediaBox.height;
   const opacity = watermarkOpacity / 100;
-  const fontSizeCss = (72 * (watermarkSize / 100)) * scale;
-  const imgWidthCss = watermarkImageDims?.width ? (watermarkImageDims.width * (watermarkSize / 100)) * scale : 0;
-  const imgHeightCss = watermarkImageDims?.height ? (watermarkImageDims.height * (watermarkSize / 100)) * scale : 0;
+  // A single watermark larger than the page is shrunk to fit (the editor
+  // applies the same factor when saving, so preview and output match).
+  const natural = watermarkNaturalSize(watermarkType, watermarkText, watermarkSize, watermarkImageDims, watermarkShapeType);
+  const fit = watermarkMosaic ? 1 : watermarkFitScale(natural.width, natural.height, watermarkRotation, pageWidth, pageHeight);
+  const sizePercent = watermarkSize * fit;
+  const fontSizeCss = (72 * (sizePercent / 100)) * scale;
+  const imgWidthCss = watermarkImageDims?.width ? (watermarkImageDims.width * (sizePercent / 100)) * scale : 0;
+  const imgHeightCss = watermarkImageDims?.height ? (watermarkImageDims.height * (sizePercent / 100)) * scale : 0;
   const padCss = 30 * scale;
 
-  let textWidthCss = (watermarkText.length * (fontSizeCss / scale) * 0.5 * scale);
-  let textHeightCss = fontSizeCss;
+  const textWidthCss = (watermarkText.length * (fontSizeCss / scale) * 0.5 * scale);
+  const textHeightCss = fontSizeCss;
 
   let wmWidthCss = watermarkType === 'text' ? textWidthCss : watermarkType === 'shape' ? textWidthCss + 40 * scale : imgWidthCss;
   let wmHeightCss = watermarkType === 'text' ? textHeightCss : watermarkType === 'shape' ? textHeightCss + 40 * scale : imgHeightCss;

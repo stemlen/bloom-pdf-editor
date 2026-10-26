@@ -139,4 +139,17 @@ describe('Phase 14 — Universal Export Engine', () => {
     expect(svg).toContain('<svg');
     expect(svg).toContain('<text');
   });
+
+  it('joins soft-wrapped lines with a space in every text export', async () => {
+    const udm = await buildUdm([
+      ...wordChars('Bloom wraps this paragraph so that', 72, 500, 12),
+      ...wordChars('exporters keep words apart.', 72, 486, 12),
+    ]);
+    const manager = new ExportManager(true);
+    for (const target of ['markdown', 'txt', 'rtf', 'json'] as const) {
+      const text = new TextDecoder().decode((await manager.export(udm, target)).bytes);
+      expect(text, target).toContain('so that exporters');
+      expect(text, target).not.toContain('thatexporters');
+    }
+  });
 });

@@ -42,8 +42,15 @@ export function PasswordDialog({
         <div className="mb-5 text-center">
           <div>
             <h2 className="text-lg font-extrabold tracking-tight text-foreground">Password required</h2>
-            <p className="mt-0.5 text-[13px] text-muted-foreground break-all">
-              {fileName ? `"${fileName}" is encrypted` : 'This PDF is encrypted'}
+            <p className="mt-0.5 text-[13px] text-muted-foreground text-balance">
+              {fileName ? (
+                <>
+                  {/* Only a long file name may wrap mid-word; the rest wraps at spaces. */}
+                  <span className="[overflow-wrap:anywhere]">&quot;{fileName}&quot;</span> is encrypted
+                </>
+              ) : (
+                'This PDF is encrypted'
+              )}
             </p>
           </div>
         </div>

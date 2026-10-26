@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useRef, useState } from 'react';
 import { Image as ImageIcon, Replace, Copy, Trash2, X, Check } from 'lucide-react';
 import type { ImageItem } from '@/engine';
+import { useLatestRef, useWindowPointerDrag } from '../hooks/usePointerDrag';
 
 interface EmbeddedImageOverlayProps {
   item: ImageItem;
@@ -35,12 +36,16 @@ export function EmbeddedImageOverlay(props: EmbeddedImageOverlayProps) {
   const [live, setLive] = useState({
     x: item.x, y: item.y, width: item.width, height: item.height,
   });
-  const liveRef = useRef(live);
-  liveRef.current = live;
+  const liveRef = useLatestRef(live);
 
-  useEffect(() => {
+  // Re-sync the live frame whenever the underlying image changes
+  // (adjusting state during render instead of in an effect).
+  const itemKey = `${item.x}|${item.y}|${item.width}|${item.height}|${item.name}`;
+  const [syncedItemKey, setSyncedItemKey] = useState(itemKey);
+  if (syncedItemKey !== itemKey) {
+    setSyncedItemKey(itemKey);
     setLive({ x: item.x, y: item.y, width: item.width, height: item.height });
-  }, [item.x, item.y, item.width, item.height, item.name]);
+  }
 
   const dragMode = useRef<'move' | 'resize-se' | null>(null);
   const origin = useRef({
@@ -80,8 +85,6 @@ export function EmbeddedImageOverlay(props: EmbeddedImageOverlayProps) {
   const endDragStable = useCallback(async () => {
     const mode = dragMode.current;
     dragMode.current = null;
-    window.removeEventListener('pointermove', onPointerMove);
-    window.removeEventListener('pointerup', endDragStable);
 
     if (!mode) return;
     const cur = liveRef.current;
@@ -107,7 +110,9 @@ export function EmbeddedImageOverlay(props: EmbeddedImageOverlayProps) {
         height: origin.current.height,
       });
     }
-  }, [onCommitMove, onCommitResize, onPointerMove]);
+  }, [onCommitMove, onCommitResize, liveRef]);
+
+  const attachDragListeners = useWindowPointerDrag(onPointerMove, endDragStable);
 
   const begin = useCallback((mode: 'move' | 'resize-se', e: React.PointerEvent) => {
     e.preventDefault();
@@ -121,9 +126,8 @@ export function EmbeddedImageOverlay(props: EmbeddedImageOverlayProps) {
       width: liveRef.current.width,
       height: liveRef.current.height,
     };
-    window.addEventListener('pointermove', onPointerMove);
-    window.addEventListener('pointerup', endDragStable);
-  }, [onPointerMove, endDragStable]);
+    attachDragListeners();
+  }, [attachDragListeners, liveRef]);
 
   const box = toCss(live);
 

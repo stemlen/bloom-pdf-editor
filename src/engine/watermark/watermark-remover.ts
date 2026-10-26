@@ -29,7 +29,7 @@ import {
   PDFStream,
   type PDFPageInfo,
 } from '../types';
-import type { DetectedWatermark } from './watermark-detector';
+import { detectWatermarks, type DetectedWatermark } from './watermark-detector';
 
 // ─── Removal result types ───────────────────────────────────────────────────
 
@@ -951,8 +951,6 @@ export function detectAndRemoveAllWatermarks(
     dryRun?: boolean;
   },
 ): { detections: DetectedWatermark[]; removal: BatchRemovalResult } {
-  const { detectWatermarks } = require('./watermark-detector');
-
   const detections = detectWatermarks(doc, {
     minConfidence: options?.minConfidence ?? 0.4,
   });

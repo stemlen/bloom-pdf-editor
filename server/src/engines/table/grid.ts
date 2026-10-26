@@ -111,11 +111,38 @@ function boundariesFromCenters(centers: number[], min: number, max: number): num
   return snap(bounds, 2);
 }
 
-function vectorToLines(v: RawVector): GridLine[] {
+/**
+ * Path commands may be in the path's local space (with the CTM in
+ * `transform`) or already in page space. Use whichever matches the bbox.
+ */
+function pageSpaceCommands(v: RawVector): RawVector['pathCommands'] {
+  const [a, b, c, d, e, f] = v.transform ?? [1, 0, 0, 1, 0, 0];
+  if (a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0) return v.pathCommands;
+  const box = v.bbox;
+  const inBox = (x: number, y: number) =>
+    x >= box.x - 2 && x <= box.x + box.width + 2 && y >= box.y - 2 && y <= box.y + box.height + 2;
+  const pts = v.pathCommands.flatMap((cmd) =>
+    'x' in cmd && 'y' in cmd ? [[cmd.x as number, cmd.y as number] as const] : [],
+  );
+  if (pts.every(([x, y]) => inBox(x, y))) return v.pathCommands;
+  // Rotated or skewed paths are not ruling lines; only axis-aligned CTMs map cleanly.
+  if (b !== 0 || c !== 0) return [];
+  return v.pathCommands.map((cmd) => {
+    if (cmd.op === 're') {
+      return { ...cmd, x: a * cmd.x + e, y: d * cmd.y + f, w: a * cmd.w, h: d * cmd.h };
+    }
+    if ('x' in cmd && 'y' in cmd) {
+      return { ...cmd, x: a * (cmd.x as number) + e, y: d * (cmd.y as number) + f };
+    }
+    return cmd;
+  }) as RawVector['pathCommands'];
+}
+
+export function vectorToLines(v: RawVector): GridLine[] {
   const out: GridLine[] = [];
   let cx = 0;
   let cy = 0;
-  for (const cmd of v.pathCommands) {
+  for (const cmd of pageSpaceCommands(v)) {
     if (cmd.op === 'm') {
       cx = cmd.x;
       cy = cmd.y;
@@ -142,10 +169,10 @@ function vectorToLines(v: RawVector): GridLine[] {
       cx = cmd.x;
       cy = cmd.y;
     } else if (cmd.op === 're') {
-      const x0 = cmd.x;
-      const y0 = cmd.y;
-      const x1 = cmd.x + cmd.w;
-      const y1 = cmd.y + cmd.h;
+      const x0 = Math.min(cmd.x, cmd.x + cmd.w);
+      const y0 = Math.min(cmd.y, cmd.y + cmd.h);
+      const x1 = Math.max(cmd.x, cmd.x + cmd.w);
+      const y1 = Math.max(cmd.y, cmd.y + cmd.h);
       out.push(
         { orientation: 'v', position: x0, start: y0, end: y1, strokeWidth: v.strokeWidth },
         { orientation: 'v', position: x1, start: y0, end: y1, strokeWidth: v.strokeWidth },

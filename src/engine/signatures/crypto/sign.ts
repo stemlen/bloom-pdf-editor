@@ -64,7 +64,7 @@ export function createSignatureField(
 
   // Ensure AcroForm
   const catalog = doc.catalog;
-  let acro = catalog.get('AcroForm');
+  const acro = catalog.get('AcroForm');
   if (!acro) {
     const acroDict = new PDFDict();
     acroDict.set('Fields', new PDFArray([ref]));

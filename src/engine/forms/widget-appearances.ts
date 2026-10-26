@@ -16,6 +16,7 @@ import {
 import { resolveRef } from '../parser/parser';
 import { fieldDictForWidget, setFormFieldValue } from './apply-field';
 import type { AcroFormWidget } from './types';
+import { onStateName } from './detect-fields';
 import { getNextObjNum } from '../writer/serializer';
 
 function buildCheckAppearance(on: boolean, w: number, h: number): PDFStream {
@@ -33,34 +34,36 @@ function buildCheckAppearance(on: boolean, w: number, h: number): PDFStream {
   return new PDFStream(dict, bytes, bytes);
 }
 
-/** Set checkbox/radio value and regenerate /AP On/Off appearances. */
+/**
+ * Set a check box or radio value. Existing /AP appearances (and their export
+ * values, e.g. /basic) are kept; appearances are only built when missing.
+ */
 export function setButtonFieldValue(
   doc: PDFDocumentData,
   widget: AcroFormWidget,
   checked: boolean,
   onName = 'Yes',
 ): void {
-  setFormFieldValue(doc, widget, checked);
+  if (widget.readOnly) return;
+  if (onStateName(widget.dict, doc.objects)) {
+    setFormFieldValue(doc, widget, checked);
+    return;
+  }
 
   const w = widget.rect?.width ?? 12;
   const h = widget.rect?.height ?? 12;
-  const onStream = buildCheckAppearance(true, w, h);
-  const offStream = buildCheckAppearance(false, w, h);
-
   const onRef = new PDFRef(getNextObjNum(doc), 0);
-  doc.objects.set(onRef.toKey(), onStream);
+  doc.objects.set(onRef.toKey(), buildCheckAppearance(true, w, h));
   const offRef = new PDFRef(getNextObjNum(doc), 0);
-  doc.objects.set(offRef.toKey(), offStream);
+  doc.objects.set(offRef.toKey(), buildCheckAppearance(false, w, h));
 
   const nDict = new PDFDict();
   nDict.set(onName, onRef);
   nDict.set('Off', offRef);
-
   const ap = new PDFDict();
   ap.set('N', nDict);
   widget.dict.set('AP', ap);
-  widget.dict.set('AS', new PDFName(checked ? onName : 'Off'));
-  fieldDictForWidget(widget, doc.objects).set('V', new PDFName(checked ? onName : 'Off'));
+  setFormFieldValue(doc, widget, checked);
 }
 
 /** Set a choice (dropdown/list) field value. */

@@ -1,3 +1,5 @@
+import type { RemovedImageRecord } from '@/app/editor/types';
+
 const DB_NAME = 'pdf-editor-db';
 const DB_VERSION = 2;
 const STORE_NAME = 'pdf-files';
@@ -124,10 +126,10 @@ export async function clearEditorSession(): Promise<void> {
   });
 }
 
-export function deduplicateRemovedImages(images: any[]): any[] {
+export function deduplicateRemovedImages(images: RemovedImageRecord[]): RemovedImageRecord[] {
   if (!Array.isArray(images)) return [];
   const seen = new Set<string>();
-  const deduped: any[] = [];
+  const deduped: RemovedImageRecord[] = [];
   for (const img of images) {
     if (!img) continue;
     const key = img.dataUrl || img.id;
@@ -139,7 +141,7 @@ export function deduplicateRemovedImages(images: any[]): any[] {
   return deduped;
 }
 
-export async function saveRemovedImages(images: any[]): Promise<void> {
+export async function saveRemovedImages(images: RemovedImageRecord[]): Promise<void> {
   const clean = deduplicateRemovedImages(images);
   try {
     const db = await openDb();
@@ -159,14 +161,14 @@ export async function saveRemovedImages(images: any[]): Promise<void> {
   }
 }
 
-export async function loadRemovedImages(): Promise<any[]> {
+export async function loadRemovedImages(): Promise<RemovedImageRecord[]> {
   try {
     const db = await openDb();
     return new Promise((resolve) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const store = tx.objectStore(STORE_NAME);
       const req = store.get(REMOVED_IMAGES_KEY);
-      req.onsuccess = () => resolve(deduplicateRemovedImages((req.result as any[]) ?? []));
+      req.onsuccess = () => resolve(deduplicateRemovedImages((req.result as RemovedImageRecord[] | undefined) ?? []));
       req.onerror = () => {
         try {
           const fallback = localStorage.getItem('bloom_removed_images');

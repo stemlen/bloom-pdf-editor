@@ -23,7 +23,7 @@ test("encrypt a document with a password", async ({ page }) => {
   const panel = page.getByTestId("security-panel");
   await panel.getByRole("button", { name: "Protect", exact: true }).click();
   await panel.getByPlaceholder("Optional open password").fill("tulip42");
-  await panel.getByPlaceholder("Required for permissions").fill("owner42");
+  await panel.getByPlaceholder("Leave blank to generate a strong one").first().fill("owner42");
   await panel.getByRole("switch", { name: "Allow copy" }).click();
   await panel.getByRole("button", { name: "Encrypt PDF" }).click();
   await expect(panel.getByText("Document encrypted")).toBeVisible();

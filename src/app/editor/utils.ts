@@ -1,5 +1,6 @@
 import type { TextRun, ImageItem, PathItem, FontData, TextLine } from '@/engine';
 import {
+  EMOJI_FONT_FALLBACKS,
   hitTestTextLine,
   findNearestTextLine,
   caretIndexFromLineX,
@@ -89,7 +90,11 @@ export function getOverlayFontFamily(fontName: string, fontData?: FontData): str
   if (fontData?.fontBytes && fontData.baseFont) {
     const stripped = stripPdfFontPrefix(fontData.baseFont);
     const display = getDisplayFontFamily(fontName, fontData);
-    return `"${stripped}", "${fontData.baseFont}", "${display}", serif`;
+    // Glyphs missing from the embedded subset fall back to a family of the
+    // same kind (FontDescriptor /Flags bit 2 = Serif), BE-207.
+    const flags = fontData.flags;
+    const generic = `${EMOJI_FONT_FALLBACKS}, ${flags !== undefined && (flags & 0b11) === 0 ? 'Helvetica, Arial, sans-serif' : 'serif'}`;
+    return `"${stripped}", "${fontData.baseFont}", "${display}", ${generic}`;
   }
   // Match canvas renderer — Standard14 faces must use the same cssFamily or
   // mid-line inserts look like a different (often lighter) face than neighbors.

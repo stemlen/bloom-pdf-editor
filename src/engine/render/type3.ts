@@ -4,7 +4,45 @@
 
 import type { FontData } from '../fonts/font-parser';
 import { parseContentStream, type CSInstruction } from '../content/operator-lexer';
-import { PDFNumber, type PDFStream } from '../types';
+import { PDFName, PDFNumber, type PDFObject, type PDFStream } from '../types';
+import { decodeImage } from './image-decoder';
+
+/** Decoded Type3 glyph images, ready for synchronous drawing (BE-205). */
+const type3ImageCache = new WeakMap<PDFStream, OffscreenCanvas | null>();
+
+/**
+ * Decode the images Type3 glyphs paint (colour emoji) ahead of drawing, since
+ * glyphs are drawn synchronously and image decoding is asynchronous.
+ */
+export async function prepareType3Images(
+  fonts: Map<string, FontData>,
+  objects: Map<string, PDFObject>,
+): Promise<void> {
+  if (typeof OffscreenCanvas === 'undefined') return;
+  const jobs: Promise<void>[] = [];
+  for (const font of fonts.values()) {
+    if (!font.type3Images) continue;
+    for (const stream of font.type3Images.values()) {
+      if (type3ImageCache.has(stream)) continue;
+      type3ImageCache.set(stream, null);
+      jobs.push((async () => {
+        try {
+          const decoded = await decodeImage(stream, objects);
+          if (!decoded) return;
+          const canvas = new OffscreenCanvas(decoded.width, decoded.height);
+          const ctx = canvas.getContext('2d');
+          if (!ctx) return;
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          ctx.putImageData(new ImageData(decoded.data as any, decoded.width, decoded.height), 0, 0);
+          type3ImageCache.set(stream, canvas);
+        } catch {
+          // Leave the glyph blank rather than failing the page.
+        }
+      })());
+    }
+  }
+  await Promise.all(jobs);
+}
 
 /**
  * Parsed CharProcs are cached per stream object (not per draw call). The same
@@ -119,6 +157,29 @@ export function drawType3Glyph(
       case 'd0':
       case 'd1':
         break;
+      case 'q':
+        ctx.save();
+        break;
+      case 'Q':
+        ctx.restore();
+        break;
+      case 'cm':
+        ctx.transform(n(0), n(1), n(2), n(3), n(4), n(5));
+        break;
+      case 'Do': {
+        // Image glyph: paint the decoded image into the unit square.
+        const nameOp = ops[0];
+        const stream = nameOp instanceof PDFName ? fontData.type3Images?.get(nameOp.name) : undefined;
+        const img = stream ? type3ImageCache.get(stream) : undefined;
+        if (img) {
+          ctx.save();
+          ctx.scale(1 / img.width, -1 / img.height);
+          ctx.translate(0, -img.height);
+          ctx.drawImage(img, 0, 0);
+          ctx.restore();
+        }
+        break;
+      }
       default:
         break;
     }

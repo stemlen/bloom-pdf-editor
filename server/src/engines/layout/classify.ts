@@ -36,7 +36,9 @@ export class RegionClassifier implements IRegionClassifier {
         .filter((b): b is LayoutBlock => b != null);
 
       const features = computeFeatures(seg.bbox, segBlocks, pageWidth, pageHeight);
-      let { kind, confidence } = decideKind(features);
+      const decided = decideKind(features);
+      let kind = decided.kind;
+      const confidence = decided.confidence;
 
       if (kind === 'caption' && !nearImageSegment(seg, segments, byId)) {
         kind = 'text_block';
