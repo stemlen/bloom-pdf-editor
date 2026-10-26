@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import type { DrawMode, EditorTool, RemovedImageRecord } from '../types';
 import type { TextRun, ImageItem, PathItem, AcroFormWidget, VisualSignature, SignatureLibraryEntry, SignatureField, ManagedIdentity, ValidationReport, LtvStatus, ManagedSignature, RevisionViewEntry, WatermarkPosition } from '@/engine';
+import { confirmDialog } from './ConfirmDialog';
 
 interface PropertiesSidebarProps {
   onClose?: () => void;
@@ -1060,9 +1061,14 @@ export function PropertiesSidebar(props: PropertiesSidebarProps) {
                 <button
                   type="button"
                   onClick={() => {
-                    if (window.confirm('Clear all removed images history?')) {
-                      onClearRemovedImages();
-                    }
+                    void confirmDialog({
+                      title: 'Clear removed images?',
+                      description: 'Images in this list can no longer be restored after you clear it.',
+                      confirmLabel: 'Clear list',
+                      destructive: true,
+                    }).then((ok) => {
+                      if (ok) onClearRemovedImages();
+                    });
                   }}
                   className="text-[10px] font-medium text-app-faint hover:text-red-400 transition-colors"
                 >

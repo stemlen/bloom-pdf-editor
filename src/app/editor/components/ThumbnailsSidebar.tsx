@@ -17,6 +17,7 @@ import {
   Files,
 } from 'lucide-react';
 import * as Tooltip from '@radix-ui/react-tooltip';
+import { confirmDialog } from './ConfirmDialog';
 
 interface ThumbnailsSidebarProps {
   totalPages: number;
@@ -439,9 +440,14 @@ export function ThumbnailsSidebar({
                           className="absolute top-2 right-2 bg-red-500/90 text-white p-1 rounded-md opacity-0 group-hover:opacity-100 transition-all shadow-md hover:bg-red-500 hover:scale-110 z-20"
                           onClick={(e) => {
                             e.stopPropagation();
-                            if (window.confirm('Do you really want to delete this page?')) {
-                              onDeletePage?.(i);
-                            }
+                            void confirmDialog({
+                              title: `Delete page ${i + 1}?`,
+                              description: 'The page and everything on it will be removed from this document.',
+                              confirmLabel: 'Delete page',
+                              destructive: true,
+                            }).then((ok) => {
+                              if (ok) onDeletePage?.(i);
+                            });
                           }}
                         >
                           <Trash2 size={12} />

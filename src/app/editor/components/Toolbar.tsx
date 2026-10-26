@@ -1,5 +1,7 @@
 import React from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
+import { confirmDialog } from './ConfirmDialog';
 import { ChevronLeft, ChevronRight, ZoomOut, ZoomIn, X, Undo2, Redo2, Search, FileOutput } from 'lucide-react';
 import type { DrawnPath } from '../types';
 import type { PDFDocumentData } from '@/engine';
@@ -67,8 +69,17 @@ export function Toolbar({
   onCompressedDownload,
 }: ToolbarProps) {
   /** Ask before leaving the editor while there are edits not yet downloaded. */
-  const confirmLeave = () =>
-    !isDirty || window.confirm('You have unsaved changes. Leave without downloading them?');
+  const router = useRouter();
+  const confirmLeave = (): Promise<boolean> =>
+    !isDirty
+      ? Promise.resolve(true)
+      : confirmDialog({
+          title: 'Leave without downloading?',
+          description: 'You have unsaved changes. They will be lost if you leave now.',
+          confirmLabel: 'Leave',
+          cancelLabel: 'Keep editing',
+          destructive: true,
+        });
 
   return (
     <header className="flex items-center justify-between gap-2 px-2 md:px-4 h-12 md:h-[58px] bg-background/85 backdrop-blur-xl border-b border-border shrink-0 z-40">
@@ -76,7 +87,7 @@ export function Toolbar({
       <div className="flex items-center gap-1 md:gap-2 min-w-0 shrink">
         <button
           onClick={() => {
-            if (confirmLeave()) onClose();
+            void confirmLeave().then((ok) => { if (ok) onClose(); });
           }}
           className="w-8 h-8 md:w-9 md:h-9 flex items-center justify-center text-muted-foreground hover:text-destructive hover:bg-destructive/10 rounded-lg transition-colors shrink-0"
           title="Close file & return home"
@@ -87,7 +98,9 @@ export function Toolbar({
         <Link
           href="/"
           onClick={(e) => {
-            if (!confirmLeave()) e.preventDefault();
+            if (!isDirty) return;
+            e.preventDefault();
+            void confirmLeave().then((ok) => { if (ok) router.push('/'); });
           }}
           aria-label="BloomPDF Editor home"
           className="hidden sm:flex items-center shrink-0 overflow-visible md:mr-5">

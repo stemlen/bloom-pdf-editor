@@ -43,6 +43,7 @@ import { CertificateImportDialog } from './components/signatures/CertificateImpo
 import { WatermarkPreview } from './components/WatermarkPreview';
 import { hitTestDrawnPath, drawnPathBounds } from './drawingHitTest';
 import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
+import { ConfirmDialogHost, confirmDialog, noticeDialog } from './components/ConfirmDialog';
 import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
 import { FindReplacePanel } from './components/FindReplacePanel';
@@ -4082,7 +4083,13 @@ export default function EditorPage() {
 
   const handleApplyRedactions = useCallback(async () => {
     if (!doc || !engineRef.current) return;
-    if (!window.confirm('Permanently remove the marked content on this page? This cannot be undone after you download the PDF.')) return;
+    const okRedact = await confirmDialog({
+      title: 'Apply redactions?',
+      description: 'The marked content on this page will be permanently removed. This can\'t be undone once you download the PDF.',
+      confirmLabel: 'Apply redactions',
+      destructive: true,
+    });
+    if (!okRedact) return;
     try {
       setIsSaving(true);
       ensureHistoryBaseline(currentPage);
@@ -5318,9 +5325,11 @@ export default function EditorPage() {
   const handleSplitAllPages = useCallback(async () => {
     if (!doc || !engineRef.current) return;
     if (doc.pages.length < 2) return;
-    const ok = window.confirm(
-      `Download ${doc.pages.length} separate PDF files (one per page)?`,
-    );
+    const ok = await confirmDialog({
+      title: 'Split into separate files?',
+      description: `This downloads ${doc.pages.length} PDF files, one for each page.`,
+      confirmLabel: `Download ${doc.pages.length} files`,
+    });
     if (!ok) return;
     try {
       setIsSaving(true);
@@ -5347,9 +5356,15 @@ export default function EditorPage() {
     }
   }, [doc, currentPage, fileName, downloadPdfBytes, createExportDocWithOverlays]);
 
-  const handleRemoveCurrentPage = useCallback(() => {
+  const handleRemoveCurrentPage = useCallback(async () => {
     if (!doc || doc.pages.length <= 1) return;
-    if (!window.confirm(`Remove page ${currentPage + 1}?`)) return;
+    const ok = await confirmDialog({
+      title: `Remove page ${currentPage + 1}?`,
+      description: 'The page and everything on it will be removed from this document.',
+      confirmLabel: 'Remove page',
+      destructive: true,
+    });
+    if (!ok) return;
     handleDeletePage(currentPage);
   }, [doc, currentPage, handleDeletePage]);
 
@@ -5365,9 +5380,12 @@ export default function EditorPage() {
         const pageArea = Math.max(1, page.mediaBox.width * page.mediaBox.height);
         const imgArea = Math.max(0, item.width) * Math.max(0, item.height);
         if (imgArea / pageArea >= 0.5) {
-          const ok = window.confirm(
-            'This image covers most of the page. Deleting it will remove most of what you see. Continue?',
-          );
+          const ok = await confirmDialog({
+            title: 'Delete this image?',
+            description: 'This image covers most of the page, so deleting it removes most of what you see.',
+            confirmLabel: 'Delete image',
+            destructive: true,
+          });
           if (!ok) return;
         }
 
@@ -6013,7 +6031,7 @@ export default function EditorPage() {
             // Create from current text selection / line
             const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
             if (!line) {
-              window.alert(LINK_NEEDS_SELECTION);
+              void noticeDialog({ title: 'Select text first', description: LINK_NEEDS_SELECTION });
               return;
             }
             const sel = editSelRef.current;
@@ -6038,7 +6056,7 @@ export default function EditorPage() {
                 setIsDirty(true);
                 setRenderKey(k => k + 1);
               } else {
-                window.alert(LINK_NEEDS_SELECTION);
+                void noticeDialog({ title: 'Select text first', description: LINK_NEEDS_SELECTION });
               }
             } catch (err) {
               console.warn('[Editor] Add link failed:', err);
@@ -6054,7 +6072,7 @@ export default function EditorPage() {
             // has nothing to link.
             const sel = editSelRef.current;
             if (!line || (editingLine && sel.end <= sel.start)) {
-              window.alert(LINK_NEEDS_SELECTION);
+              void noticeDialog({ title: 'Select text first', description: LINK_NEEDS_SELECTION });
               return;
             }
             closeLinkPopover();
@@ -7175,6 +7193,7 @@ export default function EditorPage() {
       />
 
       {/* ── Export Panel ── */}
+      <ConfirmDialogHost />
       <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} />
       <ExportPanel
         isOpen={showExportPanel}
