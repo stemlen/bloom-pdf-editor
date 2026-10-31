@@ -30,6 +30,7 @@ import {
 import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
 import { findMatchingFlowLine } from './flowLineMatch';
+import { getPdfBackend } from '@/workers/pdf/client';
 
 import { Toolbar } from './components/Toolbar';
 import { ToolsSidebar } from './components/ToolsSidebar';
@@ -928,11 +929,10 @@ export default function EditorPage() {
   // Debounced IndexedDB session autosave (PDF bytes + overlay JSON)
   useEffect(() => {
     if (!isDirty || !doc || !engineRef.current || isLoading) return;
-    const engine = engineRef.current;
     const timer = setTimeout(() => {
       void (async () => {
         try {
-          const bytes = await engine.saveDocument(doc, 'quick');
+          const bytes = await getPdfBackend().save(doc, 'quick');
           const copy = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
           await saveEditorSession({
             bytes: copy,
@@ -1039,7 +1039,7 @@ export default function EditorPage() {
                 }
               } catch {}
             }
-            const parsed = await engine.parsePDF(new Uint8Array(session.bytes));
+            const parsed = await getPdfBackend().parse(new Uint8Array(session.bytes));
             if (cancelled) return;
             if (!engine.securityEngine.isEncrypted(parsed)) {
               await finishLoad(parsed, engine, {
@@ -1075,25 +1075,19 @@ export default function EditorPage() {
 
         setFileName(stored.fileName);
         const pdfBytes = new Uint8Array(stored.bytes);
-        const parsed = await engine.parsePDF(pdfBytes);
+        // Parse, and for encrypted files try the empty password first (common for
+        // owner-only protection), all off the main thread.
+        const loaded = await getPdfBackend().load(pdfBytes);
         if (cancelled) return;
 
-        if (engine.securityEngine.isEncrypted(parsed)) {
-          // Try empty password first (common for owner-only protection)
-          try {
-            const opened = await engine.securityEngine.open(parsed, '');
-            if (cancelled) return;
-            await finishLoad(opened.doc, engine);
-            return;
-          } catch {
-            pendingEncryptedDocRef.current = parsed;
-            setNeedsPassword(true);
-            setIsLoading(false);
-            return;
-          }
+        if (loaded.status === 'password-required') {
+          pendingEncryptedDocRef.current = loaded.doc;
+          setNeedsPassword(true);
+          setIsLoading(false);
+          return;
         }
 
-        await finishLoad(parsed, engine);
+        await finishLoad(loaded.doc, engine);
       } catch (e) {
         if (cancelled) return;
         console.error('[Editor] Init failed:', e);
@@ -1114,7 +1108,7 @@ export default function EditorPage() {
     setIsVerifyingPassword(true);
     setPasswordError(null);
     try {
-      const opened = await engine.securityEngine.open(pending, password);
+      const opened = await getPdfBackend().open(pending, password);
       setDoc(opened.doc);
       setTotalPages(opened.doc.pages.length);
       setCurrentPage(0);
@@ -5071,7 +5065,7 @@ export default function EditorPage() {
       floatingTextsRef.current,
       floatingImagesRef.current
     );
-    const bytes = await engineRef.current.saveQuick(exportDoc);
+    const bytes = await getPdfBackend().save(exportDoc, 'quick');
     return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   }, [doc, currentPage, isDirty, createExportDocWithOverlays]);
 
@@ -5080,7 +5074,6 @@ export default function EditorPage() {
     if (!doc || !engineRef.current) return;
     try {
       setIsSaving(true);
-      const engine = engineRef.current;
       const raw = doc.rawBytes;
       const noOverlays =
         drawnPathsRef.current.length === 0 &&
@@ -5103,9 +5096,7 @@ export default function EditorPage() {
           floatingTextsRef.current,
           floatingImagesRef.current
         );
-        bytes = saveMode === 'quick'
-          ? await engine.saveQuick(exportDoc)
-          : await engine.saveOptimized(exportDoc);
+        bytes = await getPdfBackend().save(exportDoc, saveMode);
       }
       const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
@@ -5290,7 +5281,7 @@ export default function EditorPage() {
     if (!doc || !engineRef.current) return;
     try {
       const buffer = await file.arrayBuffer();
-      const sourceDoc = await engineRef.current.parsePDF(new Uint8Array(buffer));
+      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
       const insertAt = doc.pages.length;
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, insertAt);
       refreshAfterPageOp(doc);
@@ -5310,9 +5301,7 @@ export default function EditorPage() {
         floatingTextsRef.current,
         floatingImagesRef.current
       );
-      const engine = engineRef.current;
-      const extracted = engine.extractPages(exportDoc, [currentPage]);
-      const bytes = await engine.saveQuick(extracted);
+      const [bytes] = await getPdfBackend().extractPages(exportDoc, [[currentPage]]);
       const base = (fileName || 'document').replace(/\.pdf$/i, '');
       downloadPdfBytes(bytes, `${base}-page-${currentPage + 1}.pdf`);
     } catch (e) {
@@ -5340,14 +5329,20 @@ export default function EditorPage() {
         floatingTextsRef.current,
         floatingImagesRef.current
       );
-      const engine = engineRef.current;
       const base = (fileName || 'document').replace(/\.pdf$/i, '');
-      for (let i = 0; i < exportDoc.pages.length; i++) {
-        const extracted = engine.extractPages(exportDoc, [i]);
-        const bytes = await engine.saveQuick(extracted);
-        downloadPdfBytes(bytes, `${base}-page-${i + 1}.pdf`);
-        // Brief pause so the browser doesn't coalesce / block downloads
-        await new Promise((r) => setTimeout(r, 120));
+      // Extract in small batches: one trip to the worker per batch, without holding every
+      // page's PDF in memory at once on large documents.
+      const BATCH = 8;
+      for (let start = 0; start < exportDoc.pages.length; start += BATCH) {
+        const end = Math.min(start + BATCH, exportDoc.pages.length);
+        const groups: number[][] = [];
+        for (let i = start; i < end; i++) groups.push([i]);
+        const batch = await getPdfBackend().extractPages(exportDoc, groups);
+        for (let j = 0; j < batch.length; j++) {
+          downloadPdfBytes(batch[j], `${base}-page-${start + j + 1}.pdf`);
+          // Brief pause so the browser doesn't coalesce / block downloads
+          await new Promise((r) => setTimeout(r, 120));
+        }
       }
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t split the pages', e));
@@ -5530,7 +5525,7 @@ export default function EditorPage() {
     if (!doc || !engineRef.current) return;
     try {
       const buffer = await file.arrayBuffer();
-      const sourceDoc = await engineRef.current.parsePDF(new Uint8Array(buffer));
+      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, index);
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
       refreshAfterPageOp(doc, nextPage);

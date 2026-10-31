@@ -8,6 +8,7 @@ import { useRouter } from 'next/navigation';
 import { loadPdfFromStorage } from '@/lib/pdfStorage';
 import type { PDFDocumentData, PdfPermissions } from '@/engine';
 import { friendlyPdfError } from '@/lib/pdfErrors';
+import { getPdfBackend } from '@/workers/pdf/client';
 
 export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof import('@/engine')) => void) {
   const router = useRouter();
@@ -39,28 +40,19 @@ export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof 
         engineRef.current = engine;
 
         const pdfBytes = new Uint8Array(stored.bytes);
-        const parsed = await engine.parsePDF(pdfBytes);
+        const loaded = await getPdfBackend().load(pdfBytes);
         if (cancelled) return;
 
-        if (engine.securityEngine.isEncrypted(parsed)) {
-          try {
-            const opened = await engine.securityEngine.open(parsed, '');
-            if (cancelled) return;
-            setDoc(opened.doc);
-            setPermissions(opened.permissions);
-            onParsed?.(opened.doc, engine);
-            setIsLoading(false);
-            return;
-          } catch {
-            pendingEncryptedRef.current = parsed;
-            setNeedsPassword(true);
-            setIsLoading(false);
-            return;
-          }
+        if (loaded.status === 'password-required') {
+          pendingEncryptedRef.current = loaded.doc;
+          setNeedsPassword(true);
+          setIsLoading(false);
+          return;
         }
 
-        setDoc(parsed);
-        onParsed?.(parsed, engine);
+        setDoc(loaded.doc);
+        if (loaded.permissions) setPermissions(loaded.permissions);
+        onParsed?.(loaded.doc, engine);
         setIsLoading(false);
       } catch (e) {
         if (cancelled) return;
@@ -82,7 +74,7 @@ export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof 
     setIsVerifyingPassword(true);
     setPasswordError(null);
     try {
-      const opened = await engine.securityEngine.open(pending, password);
+      const opened = await getPdfBackend().open(pending, password);
       setDoc(opened.doc);
       setPermissions(opened.permissions);
       setNeedsPassword(false);
@@ -103,10 +95,7 @@ export function usePdfDocument(onParsed?: (doc: PDFDocumentData, engine: typeof 
 
   const download = useCallback(async (mode: 'quick' | 'optimized' = 'optimized') => {
     if (!doc || !engineRef.current) return;
-    const engine = engineRef.current;
-    const bytes = mode === 'quick'
-      ? await engine.saveQuick(doc, modifiedKeys)
-      : await engine.saveOptimized(doc);
+    const bytes = await getPdfBackend().save(doc, mode, mode === 'quick' ? modifiedKeys : undefined);
 
     const blob = new Blob([bytes as BlobPart], { type: 'application/pdf' });
     const url = URL.createObjectURL(blob);
