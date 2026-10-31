@@ -243,22 +243,37 @@ npm run server:test           # Server engine tests
 # End-to-end tests (Playwright) against a production build
 npx playwright install chromium   # once
 npm run fixtures                  # regenerate tests/fixtures (sample.pdf, form.pdf, small.png)
-npm run build                     # static export → out/
+npm run build:static              # static export → out/ (BLOOM_STATIC_EXPORT=1)
 npm run test:e2e                  # serves out/ on :4174 and runs tests/*.spec.ts
 ```
 
 The end-to-end suite covers every editor feature — text editing, pages, annotations, images, forms, watermarks, signatures (visual and cryptographic), security, find & replace, OCR, exports and all 12 document conversions — plus light / dark / mobile smoke tests that fail on console errors or horizontal overflow. OCR needs network access to the jsDelivr CDN.
 
-### Deploy (Cloudflare Workers)
+### Deploy (Cloudflare Workers, OpenNext)
 
-`npm run build` produces a static site in `out/` (Next.js `output: 'export'`). `wrangler.json` serves that folder as Workers static assets, so no Worker script is needed:
+The live site (editor.bloompdf.app) is the Worker `bloom-pdf-editor`, built with [`@opennextjs/cloudflare`](https://opennext.js.org/cloudflare) (pinned to the release that supports Next.js 16.2.x — bump it together with `next`). `wrangler.json` points `main` at `.open-next/worker.js` and serves `.open-next/assets` (including `public/_headers`) as the `ASSETS` binding. All routes are prerendered, so no KV/R2/D1 cache bindings are needed.
 
 ```bash
-npm run deploy                # build + wrangler deploy
-npm run preview               # build + serve out/ locally through wrangler dev
+npm run preview               # OpenNext build + local Worker (wrangler dev)
+npm run deploy                # OpenNext build + wrangler deploy (production — needs Cloudflare login)
+npx opennextjs-cloudflare build && npx wrangler deploy --dry-run   # validate without deploying
 ```
 
-For Git-connected Workers Builds use build command `npm run build` and deploy command `npx wrangler deploy`. `public/_headers` (copied to `out/_headers`) sets the security headers and long-lived caching for `/_next/static/*`.
+`npm run build` is the plain Next.js build that OpenNext invokes internally; do not use it as a deploy command. `npm run build:static` emits the old static export in `out/` for the Playwright suite.
+
+**CI (GitHub Actions)**
+
+- `.github/workflows/preview.yml` — on every PR from this repo: OpenNext build, then `wrangler versions upload --preview-alias pr-<N>`. The preview URL is posted (and updated) as a PR comment. Previews never touch production traffic.
+- `.github/workflows/deploy.yml` — production deploy (`wrangler deploy`), manual `workflow_dispatch` from `main`. Add a `push: branches: [main]` trigger to deploy on merge.
+
+Required repository secrets (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `CLOUDFLARE_API_TOKEN` | API token with **Workers Scripts: Edit** on the account (the "Edit Cloudflare Workers" template works) |
+| `CLOUDFLARE_ACCOUNT_ID` | The Cloudflare account ID that owns the `bloom-pdf-editor` Worker |
+
+Preview URLs also need the Worker's workers.dev subdomain and Preview URLs enabled (`"preview_urls": true` in `wrangler.json`; check Worker → Settings → Domains & Routes). Without the secrets, the preview job logs a warning and skips. If the Worker is also connected to Cloudflare Workers Builds, disable one of the two deploy paths.
 
 ### Docker (Optional, standalone engine server)
 
