@@ -231,6 +231,22 @@ export type {
 // ── Editor ──
 export { applyTextEdits, applyRunPositionShifts, findTextInPage, findAndReplace, insertTextRun } from './editor/text-editor';
 export { insertImageRun, replaceImageXObject } from './editor/image-editor';
+export {
+  insertTextBox,
+  layoutTextBox,
+  buildTextBoxOperators,
+  measureTextBoxString,
+  resolveTextBoxStyle,
+  textBoxFace,
+  textBoxFamily,
+  textBoxCssFamily,
+  decorationGeometry,
+  encodeWinAnsi,
+  DEFAULT_TEXT_BOX_STYLE,
+  TEXT_BOX_FONTS,
+  LINE_HEIGHT_PRESETS,
+} from './editor/text-box';
+export type { TextBoxStyle, TextBoxAlign, TextBoxList, TextBoxLayout, TextBoxLine } from './editor/text-box';
 export type { TextEdit, EditResult, RunPositionShift } from './editor/text-editor';
 export {
   applyObjectTransform,
