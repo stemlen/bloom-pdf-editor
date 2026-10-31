@@ -1,0 +1,98 @@
+name: Preview deployment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview:
+    name: Upload preview version
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Fork PRs and Dependabot PRs do not receive repository secrets.
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.actor != 'dependabot[bot]'
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Check Cloudflare credentials
+        id: creds
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::warning::CLOUDFLARE_API_TOKEN / CLOUDFLARE_ACCOUNT_ID are not configured; skipping preview."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.creds.outputs.available == 'true'
+
+      - uses: actions/setup-node@v4
+        if: steps.creds.outputs.available == 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
+
+      - name: Install dependencies
+        if: steps.creds.outputs.available == 'true'
+        run: npm ci
+
+      - name: Build (OpenNext)
+        if: steps.creds.outputs.available == 'true'
+        run: npx opennextjs-cloudflare build
+
+      - name: Upload preview version
+        if: steps.creds.outputs.available == 'true'
+        id: upload
+        env:
+          WRANGLER_OUTPUT_FILE_PATH: ${{ runner.temp }}/wrangler-output.ndjson
+        run: |
+          npx wrangler versions upload \
+            --preview-alias "pr-${PR_NUMBER}" \
+            --tag "pr-${PR_NUMBER}" \
+            --message "PR #${PR_NUMBER} @ ${GITHUB_SHA::7}"
+          alias_url=$(jq -rs 'map(select(.type == "version-upload")) | last | .preview_alias_url // empty' "$WRANGLER_OUTPUT_FILE_PATH")
+          version_url=$(jq -rs 'map(select(.type == "version-upload")) | last | .preview_url // empty' "$WRANGLER_OUTPUT_FILE_PATH")
+          echo "alias_url=${alias_url}" >> "$GITHUB_OUTPUT"
+          echo "version_url=${version_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment preview URL on the PR
+        if: steps.creds.outputs.available == 'true'
+        uses: actions/github-script@v7
+        env:
+          ALIAS_URL: ${{ steps.upload.outputs.alias_url }}
+          VERSION_URL: ${{ steps.upload.outputs.version_url }}
+        with:
+          script: |
+            const marker = '<!-- bloom-preview-deployment -->';
+            const url = process.env.ALIAS_URL || process.env.VERSION_URL;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const body = [
+              marker,
+              '### Preview deployment',
+              url ? `**${url}**` : 'Version uploaded, but Wrangler did not report a preview URL. Enable Preview URLs for the Worker in the Cloudflare dashboard.',
+              '',
+              `Commit \`${sha}\`. Preview versions are not promoted to production.`,
+            ].join('\n');
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find((c) => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number, body });
+            }

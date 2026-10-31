@@ -53,7 +53,8 @@ tmp*
 /server/dist
 .bloom-storage
 
-# Cloudflare (wrangler pages dev)
+# Cloudflare (OpenNext build output, wrangler state)
+/.open-next/
 .wrangler/
 
 # Playwright

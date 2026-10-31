@@ -7,9 +7,11 @@
     "server:install": "npm --prefix server ci --include=dev",
     "dev": "npm run server:build && next dev --webpack",
     "build": "npm run server:install && npm run server:build && next build",
+    "build:static": "npm run server:install && npm run server:build && BLOOM_STATIC_EXPORT=1 next build",
     "serve:out": "serve out -l 4174 --no-clipboard",
-    "preview": "npm run build && wrangler dev",
-    "deploy": "npm run build && wrangler deploy",
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "deploy": "opennextjs-cloudflare build && wrangler deploy",
+    "upload": "opennextjs-cloudflare build && opennextjs-cloudflare upload",
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -42,6 +44,7 @@
     "zustand": "^5.0.13"
   },
   "devDependencies": {
+    "@opennextjs/cloudflare": "1.20.2",
     "@playwright/test": "^1.64.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",

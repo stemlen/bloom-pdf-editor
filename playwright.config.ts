@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// Runs against the static export in out/: `npm run build` first (see README → Run Tests).
+// Runs against the static export in out/: `npm run build:static` first (see README → Run Tests).
 export default defineConfig({
   testDir: "./tests",
   timeout: 120_000,

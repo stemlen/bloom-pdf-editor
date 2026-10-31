@@ -86,7 +86,7 @@ This builds the server engine and starts Next.js. Open [http://localhost:3000](h
 | Command | What It Does |
 |---------|-------------|
 | `npm run dev` | Build server engine + start Next.js dev server |
-| `npm run build` | Production build (server + Next.js) |
+| `npm run build` | Production Next.js build (server + Next.js); deploys use `npm run deploy` |
 | `npm test` | Run client engine tests (Vitest) |
 | `npm run test:watch` | Run client tests in watch mode |
 | `npm run server:dev` | Start standalone server on :8787 |
