@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import type { PDFDocumentData, FullSecurityReport } from '@/engine';
 import { generateStrongPassword } from '@/engine/security/password/generate';
+import { getPdfBackend } from '@/workers/pdf/client';
 
 interface SecurityPanelProps {
   doc: PDFDocumentData | null;
@@ -248,7 +249,7 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
               disabled={busy || engine.securityEngine.isEncrypted(doc)}
               onClick={() => run(async () => {
                 const owner = ownerPassword || generateStrongPassword();
-                await engine.securityEngine.encrypt(doc, {
+                await getPdfBackend().encrypt(doc, {
                   userPassword,
                   ownerPassword: owner,
                   algorithm,
@@ -277,7 +278,7 @@ export function SecurityPanel({ doc, engine, onDocChange, markDirty, onClose, is
                 type="button"
                 disabled={busy}
                 onClick={() => run(async () => {
-                  await engine.securityEngine.decrypt(doc, userPassword);
+                  await getPdfBackend().decrypt(doc, userPassword);
                   return 'Document decrypted (Encrypt dict removed)';
                 })}
                 className="w-full flex items-center justify-center gap-2 rounded-lg bg-panel-elevated hover:bg-panel-elevated/80 py-2 text-app border border-app"
