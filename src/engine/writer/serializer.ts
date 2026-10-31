@@ -114,6 +114,9 @@ export async function serializeDocument(doc: PDFDocumentData): Promise<Uint8Arra
  * Falls back to standard serialization on failure.
  */
 export async function serializeDocumentCompact(doc: PDFDocumentData): Promise<Uint8Array> {
+  // Strings and streams of an encrypted document are already ciphertext, and
+  // packing them into an unencrypted ObjStm would make the file unreadable.
+  if (doc.xref.trailerDict.has('Encrypt')) return serializeDocument(doc);
   try {
     return await _serializeCompact(doc);
   } catch (err) {
@@ -238,7 +241,7 @@ function buildXrefTable(
   lines.push(`0 ${maxObjNum + 1}`);
 
   // Entry 0: free list head
-  lines.push('0000000000 65535 f \r');
+  lines.push('0000000000 65535 f ');
 
   // Entries 1 to maxObjNum
   for (let n = 1; n <= maxObjNum; n++) {
@@ -246,10 +249,10 @@ function buildXrefTable(
     if (entry) {
       const offsetStr = entry.offset.toString().padStart(10, '0');
       const genStr = entry.genNum.toString().padStart(5, '0');
-      lines.push(`${offsetStr} ${genStr} n \r`);
+      lines.push(`${offsetStr} ${genStr} n `);
     } else {
       // Free entry
-      lines.push('0000000000 00000 f \r');
+      lines.push('0000000000 00000 f ');
     }
   }
 

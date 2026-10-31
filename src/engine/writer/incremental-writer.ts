@@ -298,7 +298,7 @@ function buildIncrementalXref(offsets: Map<string, number>): Uint8Array {
     for (const entry of sub.entries) {
       const offsetStr = entry.offset.toString().padStart(10, '0');
       const genStr = entry.genNum.toString().padStart(5, '0');
-      lines.push(`${offsetStr} ${genStr} n \r`);
+      lines.push(`${offsetStr} ${genStr} n `);
     }
   }
 
