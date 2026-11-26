@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { downloadPdf, openInEditor, pdfText, trackErrors } from "./helpers";
+import { downloadPdf, fx, openInEditor, openWithPdfJs, pdfText, trackErrors } from "./helpers";
 
 test("find text across pages, replace one match, then replace all", async ({ page }) => {
   const errors = trackErrors(page);
@@ -39,6 +39,44 @@ test("find text across pages, replace one match, then replace all", async ({ pag
   expect(txt).toContain("page layout");
   expect(txt).toContain("Blossom is a privacy-first");
   expect(txt).not.toMatch(/\bBloom\b/);
+  expect(errors).toEqual([]);
+});
+
+test("finds words drawn as several text runs (Hindi and Latin) and won't write letters the fonts lack", async ({ page }) => {
+  const errors = trackErrors(page);
+  // "M"+"eeting" and "नोट"+"्स" are separate text runs in this file.
+  await openInEditor(page, fx("hindi-mixed-en.pdf"));
+  await page.keyboard.press("ControlOrMeta+f");
+  const find = page.getByPlaceholder("Search text in PDF…");
+  const replace = page.getByPlaceholder("Replace with…");
+  const count = page.getByTestId("match-count");
+  await find.fill("नोट्स");
+  await expect(count).toHaveText("1/1");
+  await find.fill("Meeting");
+  await expect(count).toHaveText("1/1");
+  await replace.fill("Session");
+  await page.getByRole("button", { name: "Replace", exact: true }).click();
+  await expect(count).toHaveText("No matches");
+
+  // Devanagari the embedded fonts have glyphs for is written...
+  await find.fill("बजट");
+  await replace.fill("भारत");
+  await page.getByRole("button", { name: "Replace All" }).click();
+  await expect(count).toHaveText("No matches");
+
+  // ...letters they lack are refused with a message, not written as "?".
+  await find.fill("भारत");
+  await expect(count).toHaveText("1/5");
+  await replace.fill("हिंदुस्तान");
+  await page.getByRole("button", { name: "Replace All" }).click();
+  await expect(page.getByText(/Can't replace with "हिंदुस्तान"/)).toBeVisible();
+  await expect(count).toHaveText("1/5");
+
+  const { bytes } = await downloadPdf(page);
+  const { text: txt } = await openWithPdfJs(bytes);
+  expect(txt).toMatch(/Session\s*Notes/);
+  expect(txt).not.toContain("बजट");
+  expect(txt).not.toContain("?");
   expect(errors).toEqual([]);
 });
 

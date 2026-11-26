@@ -35,6 +35,7 @@ import { loadFont, type FontData, charCodeToUnicode } from '../fonts/font-parser
 import { ensureFallbackFont } from '../fonts/font-augmentation';
 import { resolveRunStyleFlags } from '../flow/metrics';
 import { serializeToString } from './stream-compiler';
+import { findTextMatches, replaceInChainRuns, type TextChain, type TextMatch } from './text-search';
 
 /** Visual size for Tf when switching to the Helvetica fallback. */
 function runFontSize(run: TextRun): number {
@@ -1528,8 +1529,8 @@ export function findTextInPage(
 /**
  * Find and replace text in a page's content stream.
  *
- * @param occurrence When set, replace only that match (0-based, counted across
- *   the page's text runs in reading order); otherwise replace every match.
+ * @param occurrence When set, replace only that match (0-based, in the order
+ *   `findTextMatches` lists the page's matches); otherwise replace every match.
  */
 export function findAndReplace(
   contentBytes: Uint8Array,
@@ -1540,41 +1541,24 @@ export function findAndReplace(
   caseSensitive: boolean = false,
   occurrence?: number,
 ): EditResult {
-  const matchingRuns = findTextInPage(contentBytes, page, objects, searchText, caseSensitive);
-
+  const unchanged: EditResult = { newContentBytes: contentBytes, needsFontAugmentation: false, missingCharCodes: [] };
+  const runs = interpretPage(contentBytes, page, objects).textRuns;
+  let matches = findTextMatches(runs, searchText, caseSensitive);
   if (occurrence !== undefined) {
-    const needle = caseSensitive ? searchText : searchText.toLowerCase();
-    let seen = 0;
-    for (const run of matchingRuns) {
-      const hay = caseSensitive ? run.text : run.text.toLowerCase();
-      let idx = 0;
-      while ((idx = hay.indexOf(needle, idx)) !== -1) {
-        if (seen === occurrence) {
-          const newText = run.text.slice(0, idx) + replaceText + run.text.slice(idx + searchText.length);
-          return applyTextEdits(contentBytes, page, objects, [{ targetRun: run, newText }]);
-        }
-        seen++;
-        idx += Math.max(needle.length, 1);
-      }
-    }
-    return { newContentBytes: contentBytes, needsFontAugmentation: false, missingCharCodes: [] };
+    const one = matches[occurrence];
+    if (!one) return unchanged;
+    matches = [one];
   }
 
-  const edits: TextEdit[] = matchingRuns.map((run) => {
-    let newText: string;
-    if (caseSensitive) {
-      newText = run.text.split(searchText).join(replaceText);
-    } else {
-      // Case-insensitive replace
-      const regex = new RegExp(escapeRegex(searchText), 'gi');
-      newText = run.text.replace(regex, replaceText);
+  // A match may span several runs (see text-search.ts); edit every run it touches.
+  const byChain = new Map<TextChain, TextMatch[]>();
+  for (const m of matches) byChain.set(m.chain, [...(byChain.get(m.chain) ?? []), m]);
+  const edits: TextEdit[] = [];
+  for (const [chain, chainMatches] of byChain) {
+    for (const { run, newText } of replaceInChainRuns(chain, chainMatches, replaceText)) {
+      edits.push({ targetRun: run, newText });
     }
-    return { targetRun: run, newText };
-  });
-
+  }
+  if (edits.length === 0) return unchanged;
   return applyTextEdits(contentBytes, page, objects, edits);
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

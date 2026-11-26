@@ -27,7 +27,7 @@ import {
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
 } from './utils';
-import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
+import { PDFRef, getPageContentBytes, interpretPage, findTextMatches, textMatchBounds, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
 import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
 import { TextBoxPreview } from './components/TextBoxPreview';
@@ -71,6 +71,16 @@ export interface SearchMatch {
   runText: string;
 }
 
+
+/**
+ * Find & Replace writes the replacement with the matched text's font, or Helvetica when that
+ * font lacks a letter. Neither has Devanagari, CJK and similar scripts, so those letters
+ * would come out as "?" boxes. Returns the message to show instead, or null if all is fine.
+ */
+function missingGlyphsMessage(replacement: string, missingCharCodes: number[]): string | null {
+  if (missingCharCodes.length === 0) return null;
+  return `Can't replace with "${replacement}": this PDF's fonts can't show some of its letters, so they would appear as "?". Nothing was changed.`;
+}
 
 /** True if the run is underlined or a thin stroke path sits under it (certificate labels). */
 function runHasPathUnderline(run: TextRun, paths: PathItem[]): boolean {
@@ -2502,7 +2512,6 @@ export default function EditorPage() {
     if (!doc || !findText.trim()) return [];
 
     const query = findText.trim();
-    const lowerQuery = caseSensitive ? query : query.toLowerCase();
     const matches: SearchMatch[] = [];
 
     for (let p = 0; p < doc.pages.length; p++) {
@@ -2511,41 +2520,20 @@ export default function EditorPage() {
         const bytes = getPageContentBytes(page, doc.objects);
         const interpreted = interpretPage(bytes, page, doc.objects);
 
-        for (const run of interpreted.textRuns) {
-          const text = run.text;
-          const textToSearch = caseSensitive ? text : text.toLowerCase();
-          let idx = 0;
-          while ((idx = textToSearch.indexOf(lowerQuery, idx)) !== -1) {
-            const endIdx = idx + query.length;
-            let pdfX = run.x;
-            let pdfWidth = run.width;
-
-            if (run.glyphs && run.glyphs.length === run.text.length) {
-              const startG = run.glyphs[idx];
-              const endG = run.glyphs[endIdx - 1];
-              if (startG && endG) {
-                pdfX = startG.x;
-                pdfWidth = (endG.x + endG.width) - startG.x;
-              }
-            } else if (run.text.length > 0) {
-              const charW = run.width / run.text.length;
-              pdfX = run.x + idx * charW;
-              pdfWidth = query.length * charW;
-            }
-
-            matches.push({
-              id: `m-${p}-${idx}-${matches.length}`,
-              pageIndex: p,
-              pdfX,
-              pdfY: run.y,
-              pdfWidth: Math.max(pdfWidth, 3),
-              pdfHeight: run.height || run.fontSize || 12,
-              matchedText: text.substring(idx, endIdx),
-              runText: text,
-            });
-
-            idx += Math.max(query.length, 1);
-          }
+        // Same matcher as Replace (findAndReplace), so the counter and the replaced
+        // occurrence always agree; it also finds words split across text runs.
+        for (const match of findTextMatches(interpreted.textRuns, query, caseSensitive)) {
+          const box = textMatchBounds(match);
+          matches.push({
+            id: `m-${p}-${match.start}-${matches.length}`,
+            pageIndex: p,
+            pdfX: box.x,
+            pdfY: box.y,
+            pdfWidth: Math.max(box.width, 3),
+            pdfHeight: box.height,
+            matchedText: match.chain.text.substring(match.start, match.end),
+            runText: match.chain.text,
+          });
         }
       } catch (e) {
         console.warn(`[Search] Error on page ${p}:`, e);
@@ -2600,6 +2588,11 @@ export default function EditorPage() {
         .slice(0, activeMatchIndex)
         .filter((m) => m.pageIndex === currentMatch.pageIndex).length;
       const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive, occurrence);
+      const unshowable = missingGlyphsMessage(replaceText, result.missingCharCodes);
+      if (unshowable) {
+        setError(unshowable);
+        return;
+      }
       if (result.newContentBytes && result.newContentBytes !== bytes) {
         ensureHistoryBaseline(currentMatch.pageIndex);
         await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
@@ -2622,13 +2615,21 @@ export default function EditorPage() {
       // Work out every page's replacement first, then record the batch so a
       // single Undo reverts all pages at once (BE-203).
       const changes: { pageIndex: number; bytes: Uint8Array }[] = [];
+      const missing: number[] = [];
       for (let p = 0; p < doc.pages.length; p++) {
         const page = doc.pages[p];
         const bytes = engine.getPageContentBytes(page, doc.objects);
         const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive);
+        missing.push(...result.missingCharCodes);
         if (result.newContentBytes && result.newContentBytes !== bytes) {
           changes.push({ pageIndex: p, bytes: result.newContentBytes });
         }
+      }
+      // All or nothing: don't replace on some pages and leave "?" boxes on others.
+      const unshowable = missingGlyphsMessage(replaceText, missing);
+      if (unshowable) {
+        setError(unshowable);
+        return;
       }
       for (const { pageIndex } of changes) {
         if (!historyRef.current.hasPage(pageIndex)) pushEditorHistory('baseline', undefined, pageIndex);

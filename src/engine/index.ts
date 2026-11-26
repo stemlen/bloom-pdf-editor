@@ -230,6 +230,8 @@ export type {
 
 // ── Editor ──
 export { applyTextEdits, applyRunPositionShifts, findTextInPage, findAndReplace, insertTextRun } from './editor/text-editor';
+export { findTextMatches, textMatchBounds, buildTextChains } from './editor/text-search';
+export type { TextMatch, TextChain, TextMatchBounds } from './editor/text-search';
 export { insertImageRun, replaceImageXObject } from './editor/image-editor';
 export {
   insertTextBox,
