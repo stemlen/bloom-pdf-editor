@@ -7,6 +7,7 @@ import {
   measureTextBoxString,
   resolveTextBoxStyle,
   textBoxFace,
+  unsupportedStandardFontChars,
 } from '../editor/text-box';
 import { PDFDict, PDFName, type PDFPageInfo } from '../types';
 
@@ -128,5 +129,17 @@ describe('round trip through the PDF interpreter', () => {
     expect(runs[0].y).toBeCloseTo(500 - layout.lines[0].baseline, 2);
     expect(runs[0].y - runs[1].y).toBeCloseTo(28, 2);
     expect(runs[0].width).toBeCloseTo(layout.lines[0].width, 1);
+  });
+});
+
+describe('unsupportedStandardFontChars', () => {
+  it('lists the characters a Standard 14 font would write as ?', () => {
+    expect(unsupportedStandardFontChars('Café — “ok” € • 100%')).toEqual([]);
+    expect(unsupportedStandardFontChars('नमस्ते ok')).toEqual(['न', 'म', 'स', '्', 'त', 'े']);
+    expect(unsupportedStandardFontChars('a 😀 b 😀')).toEqual(['😀']);
+  });
+
+  it('ignores line breaks, unmapped-glyph NULs and literal question marks', () => {
+    expect(unsupportedStandardFontChars('line one\nline two?\u0000')).toEqual([]);
   });
 });

@@ -29,7 +29,11 @@ import {
 } from './utils';
 import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
-import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, unsupportedStandardFontChars, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+
+/** Warning for typed characters the PDF can't carry (written as '?'). */
+const unsupportedCharsWarning = (chars: string[]) =>
+  `Some characters you typed (${chars.slice(0, 6).join(' ')}${chars.length > 6 ? ' …' : ''}) aren't in this PDF's fonts, and fonts for scripts like Hindi can't be embedded yet, so they'll appear as "?" in the downloaded file.`;
 import { TextBoxPreview } from './components/TextBoxPreview';
 import { findMatchingFlowLine } from './flowLineMatch';
 import { getPdfBackend } from '@/workers/pdf/client';
@@ -679,6 +683,33 @@ export default function EditorPage() {
     setIsDirty(true);
   }, [pushEditorHistory]);
 
+  /**
+   * Text-box counterpart of updateFloatingImages. Text boxes were never
+   * recorded, so Undo couldn't remove, move back or restore one, and undoing
+   * an unrelated edit restored an older snapshot that silently dropped boxes
+   * added since. Typing is recorded once, when the box loses focus.
+   */
+  const updateFloatingTexts = useCallback((
+    updater: (prev: FloatingText[]) => FloatingText[],
+    label?: string,
+  ) => {
+    const next = updater(floatingTextsRef.current);
+    floatingTextsRef.current = next;
+    setFloatingTexts(next);
+    if (label) {
+      pushEditorHistory(label, { floatingTexts: next });
+      setIsDirty(true);
+    }
+    return next;
+  }, [pushEditorHistory]);
+
+  const recordFloatingTexts = useCallback((label: string) => {
+    pushEditorHistory(label, { floatingTexts: floatingTextsRef.current });
+    setIsDirty(true);
+  }, [pushEditorHistory]);
+  /** Text of the focused text box when it gained focus (to record typing on blur). */
+  const floatingTextAtFocusRef = useRef<{ id: string; text: string } | null>(null);
+
   const [selectedDrawingPage, setSelectedDrawingPage] = useState(currentPage);
   if (selectedDrawingPage !== currentPage) {
     setSelectedDrawingPage(currentPage);
@@ -767,17 +798,16 @@ export default function EditorPage() {
   const patchActiveFloatingText = useCallback((patch: Partial<TextBoxStyle>): boolean => {
     const id = activeFloatingTextIdRef.current;
     if (!id) return false;
-    setFloatingTexts(prev => prev.map(p => {
+    updateFloatingTexts(prev => prev.map(p => {
       if (p.id !== id) return p;
       const next = { ...p, ...patch };
       // Keep the box's top edge fixed when the size changes.
       if (patch.fontSize != null && patch.fontSize !== p.fontSize) next.pdfY = p.pdfY + p.fontSize - patch.fontSize;
       return next;
-    }));
-    setIsDirty(true);
+    }), 'format-text-box');
     requestAnimationFrame(() => floatingTextAreaRefs.current.get(id)?.focus({ preventScroll: true }));
     return true;
-  }, []);
+  }, [updateFloatingTexts]);
 
   const queueOrApplyStyle = useCallback((patch: Partial<TextStyleUI>) => {
     if (patchActiveFloatingText(patch)) return;
@@ -1996,6 +2026,12 @@ export default function EditorPage() {
         if (engine.hasEmoji(commitText) && engine.countEmoji(commitText) > engine.countEmoji(originalText)) {
           setError('Emoji can\'t be embedded in this PDF\'s fonts, so they won\'t appear in the downloaded file.');
         }
+        // Same for other scripts the edited font lacks: the Helvetica fallback
+        // has no Devanagari etc., so the edit writes '?' — say so.
+        const unsupported = unsupportedStandardFontChars(
+          editResult.missingCharCodes.map(cp => String.fromCodePoint(cp)).join(''),
+        ).filter(ch => !engine.hasEmoji(ch));
+        if (unsupported.length > 0) setError(unsupportedCharsWarning(unsupported));
         if (editResult.needsFontAugmentation) {
           try {
             const missing = String.fromCharCode(
@@ -2699,14 +2735,6 @@ export default function EditorPage() {
     }
   }, [doc, currentPage, formFields, pushEditorHistory]);
 
-  /**
-   * Set when Shift+Enter is pressed mid-edit: the edit is committed first, and
-   * the duplicate is made from the re-extracted line once the page re-renders.
-   * The anchor's instruction indices point at the pre-edit content, so
-   * duplicating it directly copied the original text over the edited line.
-   */
-  const pendingDuplicateRef = useRef<{ baseline: number; x: number } | null>(null);
-
   const duplicateLine = useCallback(async (line: TextLine) => {
     if (!doc || !engineRef.current) return;
     try {
@@ -2731,23 +2759,25 @@ export default function EditorPage() {
     const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
     if (!doc || !engineRef.current || !line) return;
     if (editingLine) {
-      pendingDuplicateRef.current = { baseline: line.baseline, x: line.x };
-      await handleEditSubmit(false);
+      // Commit (and close) the edit first, then duplicate the line as it is
+      // in the committed content: the anchor's instruction indices point at
+      // the pre-edit stream, so copying it directly put the original text
+      // over the edited line. Waiting for a re-render instead never fired
+      // when the edit was left open or nothing had changed.
+      const anchor = { baseline: line.baseline, x: line.x };
+      await handleEditSubmit(true);
+      const engine = engineRef.current;
+      const page = doc.pages[currentPage];
+      const bytes = engine.getPageContentBytes(page, doc.objects);
+      const lines = engine.buildDocumentFlow(engine.interpretPage(bytes, page, doc.objects).textRuns).lines;
+      const fresh = lines.find((l: TextLine) =>
+        Math.abs(l.baseline - anchor.baseline) < 2 && Math.abs(l.x - anchor.x) < 4,
+      );
+      if (fresh) await duplicateLine(fresh);
       return;
     }
     await duplicateLine(line);
-  }, [doc, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
-
-  // Finish a Shift+Enter duplicate once the committed edit has re-rendered.
-  useEffect(() => {
-    const pending = pendingDuplicateRef.current;
-    if (!pending || !renderResult || editingLine) return;
-    pendingDuplicateRef.current = null;
-    const fresh = renderResult.textLines.find(l =>
-      Math.abs(l.baseline - pending.baseline) < 2 && Math.abs(l.x - pending.x) < 4,
-    );
-    if (fresh) void duplicateLine(fresh);
-  }, [renderResult, editingLine, duplicateLine]);
+  }, [doc, currentPage, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
 
   // Resolve table cell for the current selection (for sidebar actions)
   const selectedTableCell = (() => {
@@ -2807,7 +2837,7 @@ export default function EditorPage() {
       }
       const page = doc.pages[currentPage];
       const bytes = engineRef.current.getPageContentBytes(page, doc.objects);
-      const next = engineRef.current.insertTableColumnRight(bytes, rows);
+      const next = engineRef.current.insertTableColumnRight(bytes, rows, page, doc.objects);
       await engineRef.current.updatePageContent(page.contentRefs, next, doc.objects);
       pushEditorHistory('table-add-column');
       setIsDirty(true);
@@ -3073,9 +3103,8 @@ export default function EditorPage() {
       setTextList('none');
 
       focusFloatingTextIdRef.current = newBox.id;
-      setFloatingTexts(prev => [...prev, newBox]);
+      updateFloatingTexts(prev => [...prev, newBox], 'add-text-box');
       setActiveFloatingTextId(newBox.id);
-      setIsDirty(true);
       setActiveTool('text');
 
     } else if (activeTool === 'highlight') {
@@ -3129,7 +3158,7 @@ export default function EditorPage() {
       setSelectedSignatureId(null);
       setSelectedPdfSigFieldId(null);
     }
-  }, [renderResult, doc, currentPage, scale, activeTool, editingLine, handleEditSubmit, beginEditSession, displayItems, textFontSize, textColor, textFontFamily, highlightColor, formFields, handleFormFieldSelect, linksHighlighted, linkPopoverMode, resolveLinkDisplay, pdfSignatureFields, placeLibrarySignatureIntoField, pushEditorHistory]);
+  }, [renderResult, doc, currentPage, scale, activeTool, editingLine, handleEditSubmit, beginEditSession, displayItems, textFontSize, textColor, textFontFamily, highlightColor, formFields, handleFormFieldSelect, linksHighlighted, linkPopoverMode, resolveLinkDisplay, pdfSignatureFields, placeLibrarySignatureIntoField, pushEditorHistory, updateFloatingTexts]);
 
   // Double-click in select mode → enter text edit
   const handleCanvasDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -4255,6 +4284,7 @@ export default function EditorPage() {
       startPdfX: box.pdfX,
       startPdfY: box.pdfY
     };
+    let moved = false;
 
     const handleMove = (me: PointerEvent) => {
       if (!dragInfo.current || !doc || !renderResult) return;
@@ -4265,7 +4295,8 @@ export default function EditorPage() {
 
       const { startPdfX, startPdfY } = dragInfo.current;
 
-      setFloatingTexts(prev => prev.map(p => p.id === id ? {
+      moved = true;
+      updateFloatingTexts(prev => prev.map(p => p.id === id ? {
         ...p,
         pdfX: startPdfX + pdfDx,
         pdfY: startPdfY + pdfDy,
@@ -4274,13 +4305,14 @@ export default function EditorPage() {
 
     const handleUp = () => {
       dragInfo.current = null;
+      if (moved) recordFloatingTexts('move-text-box');
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }, [floatingTexts, scale, doc, renderResult]);
+  }, [floatingTexts, scale, doc, renderResult, updateFloatingTexts, recordFloatingTexts]);
 
   const handleFloatingImagePointerDown = useCallback((e: React.PointerEvent, id: string) => {
     e.stopPropagation();
@@ -6614,10 +6646,13 @@ export default function EditorPage() {
                 >
                   {isActive && (
                     <button
+                      type="button"
+                      aria-label="Delete text box"
+                      title="Delete text box"
                       className="absolute -top-3 -right-3 bg-red-500 text-white rounded-full p-1 shadow hover:bg-red-600 transition-colors z-30"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setFloatingTexts(prev => prev.filter(p => p.id !== ft.id));
+                        updateFloatingTexts(prev => prev.filter(p => p.id !== ft.id), 'delete-text-box');
                         if (activeFloatingTextId === ft.id) setActiveFloatingTextId(null);
                       }}
                     >
@@ -6642,9 +6677,25 @@ export default function EditorPage() {
                     value={ft.text}
                     spellCheck={false}
                     onChange={(e) => {
-                      setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text: e.target.value } : p));
+                      const text = e.target.value;
+                      // Text boxes use Standard 14 fonts (WinAnsi), which have
+                      // no glyphs for other scripts: warn when one is typed.
+                      const unsupported = unsupportedStandardFontChars(text);
+                      if (unsupported.length > unsupportedStandardFontChars(ft.text).length) {
+                        setError(unsupportedCharsWarning(unsupported));
+                      }
+                      updateFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text } : p));
                     }}
-                    onFocus={() => setActiveFloatingTextId(ft.id)}
+                    onFocus={() => {
+                      floatingTextAtFocusRef.current = { id: ft.id, text: ft.text };
+                      setActiveFloatingTextId(ft.id);
+                    }}
+                    onBlur={() => {
+                      const atFocus = floatingTextAtFocusRef.current;
+                      floatingTextAtFocusRef.current = null;
+                      const now = floatingTextsRef.current.find(p => p.id === ft.id);
+                      if (atFocus?.id === ft.id && now && now.text !== atFocus.text) recordFloatingTexts('edit-text-box');
+                    }}
                     className="bg-transparent outline-none overflow-hidden block resize p-0 m-0 border-0"
                     style={{
                       fontFamily: textBoxCssFamily(st.fontFamily),
@@ -6674,7 +6725,7 @@ export default function EditorPage() {
                       const h = target.offsetHeight / scale;
                       const changed = Math.abs(w - (ft.pdfWidth ?? layout.width + st.fontSize)) > 0.5
                         || Math.abs(h - (ft.pdfHeight ?? layout.height)) > 0.5;
-                      if (changed) setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p));
+                      if (changed) updateFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p), 'resize-text-box');
                     }}
                   />
                   ) : (

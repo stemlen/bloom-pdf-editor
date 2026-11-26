@@ -100,8 +100,8 @@ test.describe("text & tables", () => {
     await page.mouse.click(cell.x, cell.y);
     await page.getByRole("button", { name: "Add Column Right" }).click();
     const { bytes } = await downloadPdf(page);
-    // One new (empty) cell per table row, placed right of the last column.
-    expect((await pageContent(bytes, 1)).match(/\(\s\)\s*Tj/g)?.length).toBeGreaterThanOrEqual(4);
+    // One visible "New" placeholder cell per table row (b3d9a8b), right of the last column.
+    expect((await pageContent(bytes, 1)).match(/\(New\)\s*Tj/g)?.length).toBeGreaterThanOrEqual(4);
   });
 
   test("restyle a line: font, colour and alignment", async ({ page }) => {

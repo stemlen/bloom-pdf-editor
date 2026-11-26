@@ -79,6 +79,27 @@ test("add a text box", async ({ page }) => {
   expect(await pdfText(bytes)).toContain("Approved by the garden club");
 });
 
+test("typing Hindi the PDF's fonts can't carry warns instead of silently writing '?'", async ({ page }) => {
+  await openInEditor(page);
+  const toast = page.getByTestId("error-toast");
+
+  // Existing line (Helvetica): the edit falls back to Helvetica, which has no Devanagari.
+  await editLine(page, await pdfPoint(page, CONTACT.x, CONTACT.y), "Contact: नमस्ते");
+  await expect(toast).toContainText('appear as "?"');
+  await page.getByRole("button", { name: "Dismiss" }).click();
+
+  // New text box (Standard 14 / WinAnsi).
+  await page.getByRole("button", { name: "Add Text Box" }).click();
+  const at = await pdfPoint(page, 300, 120);
+  await page.mouse.click(at.x, at.y);
+  const box = page.getByTestId("text-box-input");
+  await expect(box).toBeFocused();
+  await box.fill("Approved");
+  await expect(toast).toHaveCount(0);
+  await box.fill("Approved — क्षत्रिय");
+  await expect(toast).toContainText('appear as "?"');
+});
+
 test("duplicate a line below", async ({ page }) => {
   await openInEditor(page);
   const at = await pdfPoint(page, CONTACT.x, CONTACT.y);
@@ -89,6 +110,22 @@ test("duplicate a line below", async ({ page }) => {
   const { bytes } = await downloadPdf(page);
   const text = await pdfText(bytes);
   expect(text.match(/hello@bloompdf\.app/g)?.length).toBe(2);
+});
+
+test("Shift+Enter while editing commits the edit, then duplicates the edited line", async ({ page }) => {
+  await openInEditor(page);
+  const at = await pdfPoint(page, CONTACT.x, CONTACT.y);
+  await page.mouse.click(at.x, at.y);
+  await expect(page.getByLabel("Edit line")).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("Contact: row@bloompdf.app");
+  await page.keyboard.press("Shift+Enter");
+  await expect(page.getByLabel("Edit line")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  const { bytes } = await downloadPdf(page);
+  const text = await pdfText(bytes);
+  expect(text.match(/row@bloompdf\.app/g)?.length).toBe(2);
+  expect(text).not.toContain("hello@bloompdf.app");
 });
 
 test("add a row to a detected table", async ({ page }) => {
@@ -106,13 +143,13 @@ test("add a row to a detected table", async ({ page }) => {
 
 test("links: add a link to a line, then scan and find it", async ({ page }) => {
   await openInEditor(page);
-  const messages: string[] = [];
-  page.on("dialog", (d) => messages.push(d.message()));
+  // An empty scan no longer pops an alert (a64e13e); the button says so instead.
   await page.getByRole("button", { name: "Scan for Links" }).click();
-  await expect.poll(() => messages).toContain("No links found on this page.");
+  await expect(page.getByRole("button", { name: "No Links on This Page" })).toBeVisible();
 
   const at = await pdfPoint(page, CONTACT.x, CONTACT.y);
   await page.mouse.click(at.x, at.y);
+  await expect(page.getByLabel("Edit line")).toBeFocused();
   await page.keyboard.press("ControlOrMeta+a");
   await page.getByRole("button", { name: "Add Link to Selection" }).click();
   const url = page.getByPlaceholder("https://example.com");
