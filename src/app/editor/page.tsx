@@ -52,6 +52,7 @@ import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
 import { FindReplacePanel } from './components/FindReplacePanel';
 import { StatusBar } from './components/StatusBar';
 import { ExportPanel } from './components/ExportPanel';
+import { isEncryptedDocument, pdfBytesForConversion } from './export-formats';
 import { PasswordDialog } from './components/PasswordDialog';
 import { SecurityPanel } from './components/SecurityPanel';
 import { useTextStyleActions, type TextStyleUI } from './hooks/useTextStyleActions';
@@ -5140,7 +5141,8 @@ export default function EditorPage() {
     // content and currently drops non-black text fill colors / some vector paints,
     // which destroys green headings and table fills in Word export.
     const raw = doc.rawBytes;
-    if (!isDirty && raw && raw.byteLength > 5) {
+    const encrypted = isEncryptedDocument(doc);
+    if (!isDirty && !encrypted && raw && raw.byteLength > 5) {
       return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     }
     const exportDoc = await createExportDocWithOverlays(
@@ -5150,6 +5152,8 @@ export default function EditorPage() {
       floatingTextsRef.current,
       floatingImagesRef.current
     );
+    // The converter can't decrypt: give it the opened document without encryption.
+    if (encrypted) return pdfBytesForConversion(exportDoc, engineRef.current);
     const bytes = await getPdfBackend().save(exportDoc, 'quick');
     return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   }, [doc, currentPage, isDirty, createExportDocWithOverlays]);

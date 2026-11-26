@@ -377,6 +377,35 @@ export async function exportDocument(
   }
 }
 
+// ─── Converter input ────────────────────────────────────────────────────────────
+
+/**
+ * PDF bytes for the document converter from a document the editor has opened.
+ * An encrypted file is decrypted in memory when it is opened, but the
+ * converter only gets bytes and cannot decrypt them (AES files failed with
+ * zlib errors, RC4 ones came out as garbage), so it gets a copy saved
+ * without encryption. The copy only goes to the in-tab converter.
+ */
+export async function pdfBytesForConversion(
+  doc: PDFDocumentData,
+  engine: typeof import('@/engine'),
+): Promise<Uint8Array> {
+  const trailer = doc.xref.trailerDict;
+  const plainTrailer = new engine.PDFDict();
+  for (const [key, value] of trailer.entries()) {
+    if (key !== 'Encrypt') plainTrailer.set(key, value);
+  }
+  const objects = new Map(doc.objects);
+  const encryptRef = trailer.getRef('Encrypt');
+  if (encryptRef) objects.delete(encryptRef.toKey());
+  return engine.serializeDocument({ ...doc, objects, xref: { ...doc.xref, trailerDict: plainTrailer } });
+}
+
+/** True when the file was encrypted (the editor holds it decrypted in memory). */
+export function isEncryptedDocument(doc: PDFDocumentData): boolean {
+  return doc.xref.trailerDict.has('Encrypt');
+}
+
 // ─── File Size Estimation ───────────────────────────────────────────────────────
 
 export function estimateDocumentSize(doc: PDFDocumentData): SizeEstimation {

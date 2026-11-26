@@ -155,3 +155,42 @@ test("Hindi made by Chrome converts with its matras, conjuncts and invoice table
   expect(/^[\x00-\x7f]*$/.test(rtf)).toBe(true);
   expect(rtf).toContain("\\u2350?\\u2370?\\u2354?\\u2381?\\u2351?"); // मूल्य
 });
+
+test("a password-protected PDF converts to its text, not to zlib errors or garbage", async ({ page }) => {
+  const errors = trackErrors(page);
+  await page.goto("/");
+  await page.getByTestId("file-input").setInputFiles(fx("encrypted.pdf"));
+  await page.waitForURL("**/editor");
+  await page.getByLabel("Document password").fill("bloom123");
+  await page.getByRole("button", { name: "Unlock" }).click();
+  await expect(page.locator("[data-testid=page-canvas] canvas").first()).toBeVisible();
+  const panel = await openExport(page);
+  await panel.getByRole("button", { name: "Document convert" }).click();
+  for (const [label, ext] of [[/^Markdown/, "md"], [/^Word \(DOCX\)/, "docx"]] as const) {
+    await panel.getByRole("button", { name: label }).click();
+    const { name, bytes } = await download(page, panel.getByTestId("export-submit"));
+    expect(name).toBe(`encrypted.${ext}`);
+    const body = ext === "docx" ? await zipText(bytes, "word/document.xml") : text(bytes);
+    expect(body).toContain("Top secret garden plans");
+  }
+  expect(errors).toEqual([]);
+});
+
+test("a page range typed backwards exports those pages", async ({ page }) => {
+  await openInEditor(page);
+  const panel = await openExport(page);
+  await panel.getByRole("button", { name: /^Plain text \.txt$/ }).click();
+  await panel.getByRole("button", { name: "Range" }).click();
+  await panel.getByLabel("From").fill("3");
+  await panel.getByLabel("To").fill("2");
+  const lines = text((await download(page, panel.getByTestId("export-submit"))).bytes);
+  expect(lines).toContain("Sales by Region");
+  expect(lines).toContain("Appendix");
+  expect(lines).not.toContain("Quarterly Garden Report");
+
+  await panel.getByRole("button", { name: "Document convert" }).click();
+  await panel.getByRole("button", { name: /^Markdown/ }).click();
+  const md = text((await download(page, panel.getByTestId("export-submit"))).bytes);
+  expect(md).toContain("Sales by Region");
+  expect(md).not.toContain("Quarterly Garden Report");
+});
