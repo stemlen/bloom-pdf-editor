@@ -14,11 +14,16 @@
 import { parseContentStream, type CSInstruction } from './operator-lexer';
 
 /**
- * Operators that change graphics/text state that appended content relies on
- * and doesn't reset itself: CTM, ExtGState (opacity, blend), clipping, and
- * text state (scale, rise, render mode, spacing, leading).
+ * Operators that change graphics/text state that appended content may rely on:
+ * CTM, ExtGState (opacity, blend), clipping, line style, colour, and text state
+ * (scale, rise, render mode, spacing, leading). Wrapping is always safe, so err
+ * on the side of including an operator. Tf is left out: appended text always
+ * sets its own font, and fonts affect nothing else.
  */
-const STATE_OPS = new Set(['cm', 'gs', 'W', 'W*', 'Tz', 'Ts', 'Tr', 'Tc', 'Tw', 'TL']);
+const STATE_OPS = new Set([
+  'cm', 'w', 'J', 'j', 'M', 'd', 'ri', 'i', 'gs', 'CS', 'cs', 'SC', 'SCN', 'sc', 'scn',
+  'G', 'g', 'RG', 'rg', 'K', 'k', 'Tc', 'Tw', 'Tz', 'TL', 'Tr', 'Ts', 'W', 'W*',
+]);
 
 export interface StateLeak {
   /** True when content appended after this stream would not start from the default state. */

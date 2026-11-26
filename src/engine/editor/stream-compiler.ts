@@ -24,6 +24,7 @@ import {
 } from '../types';
 import { flateEncode } from '../parser/filters';
 import { parseContentStream } from '../content/operator-lexer';
+import { analyzeStateLeak, appendIsolatedContent } from '../content/append-isolation';
 
 // ─── Content stream compilation ─────────────────────────────────────────────
 
@@ -261,10 +262,6 @@ function stringToBytes(str: string): Uint8Array {
 }
 
 /** Operators that change the graphics (or text) state and outlive their stream. */
-const STATE_OPERATORS = new Set([
-  'cm', 'w', 'J', 'j', 'M', 'd', 'ri', 'i', 'gs', 'CS', 'cs', 'SC', 'SCN', 'sc', 'scn',
-  'G', 'g', 'RG', 'rg', 'K', 'k', 'Tc', 'Tw', 'Tz', 'TL', 'Tf', 'Tr', 'Ts', 'W', 'W*',
-]);
 
 /**
  * Make existing page content safe to append to: when it leaves the graphics
@@ -276,21 +273,8 @@ const STATE_OPERATORS = new Set([
  */
 export function isolateGraphicsState(content: Uint8Array): Uint8Array {
   if (content.length === 0) return content;
-  let depth = 0;
-  let minDepth = 0;
-  let leaks = false;
-  for (const ins of parseContentStream(content)) {
-    if (ins.operator === 'q') depth++;
-    else if (ins.operator === 'Q') minDepth = Math.min(minDepth, --depth);
-    else if (depth <= 0 && STATE_OPERATORS.has(ins.operator)) leaks = true;
-  }
-  if (!leaks && depth === 0 && minDepth === 0) return content;
-  // Extra leading q's absorb stray Q operators; the trailing Q's close every
-  // level the content (and this wrapper) left open.
-  const open = 1 - minDepth;
-  const close = open + depth;
-  const enc = new TextEncoder();
-  return concatBytes(enc.encode('q\n'.repeat(open)), content, enc.encode('\n' + 'Q\n'.repeat(close)));
+  if (!analyzeStateLeak(parseContentStream(content)).leaks) return content;
+  return appendIsolatedContent(content, new Uint8Array(0));
 }
 
 export function concatBytes(...arrays: Uint8Array[]): Uint8Array {
