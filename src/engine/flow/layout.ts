@@ -100,6 +100,11 @@ export function computeHorizontalShiftsFromEdits(
    * leaves trailers short and the enlarged glyphs pile onto neighbors.
    */
   fontSizeOverrides?: FontSizeOverrideRange[],
+  /**
+   * Exact width (page units) of a segment's new text when it is known —
+   * shaped text re-drawn from page glyph clusters. Null → estimate.
+   */
+  measure?: (text: string, run: TextRun) => number | null,
 ): RunShift[] {
   if (line.segments.length <= 1) return [];
 
@@ -163,8 +168,11 @@ export function computeHorizontalShiftsFromEdits(
     // Whenever spaces were inserted, trust the space-aware estimate only.
     // Pending larger fontSize: trust the override estimate (includes size ratio).
     const scaled = oldW * (newText.length / Math.max(1, seg.text.length));
+    const exact = !hasFsOverrides && measure ? measure(newText, run) : null;
     let newW: number;
-    if (hasFsOverrides && growing) {
+    if (exact != null) {
+      newW = exact;
+    } else if (hasFsOverrides && growing) {
       newW = Math.max(estimated, oldW);
     } else if (hasNewSpaces) {
       const spaceFloor =
