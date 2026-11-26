@@ -37,7 +37,8 @@ test.describe("render export", () => {
     let dl = await download(page, panel.getByTestId("export-submit"));
     expect(text(dl.bytes)).toContain("<svg");
 
-    await panel.getByRole("button", { name: /^Plain text Text line/ }).click();
+    // Button names are "<label> <extension>"; the description is shown below the grid.
+    await panel.getByRole("button", { name: /^Plain text \.txt$/ }).click();
     await panel.getByRole("button", { name: "All Pages" }).click();
     dl = await download(page, panel.getByTestId("export-submit"));
     expect(dl.name).toBe("sample.txt");
