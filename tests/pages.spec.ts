@@ -100,6 +100,33 @@ test("reorder pages by dragging thumbnails", async ({ page }) => {
   expect(text.indexOf("Appendix")).toBeLessThan(text.indexOf("Quarterly Garden Report"));
 });
 
+test("merging encrypted PDFs: owner-protected pages keep their content, password-protected ones are refused", async ({ page }) => {
+  const errors = trackErrors(page);
+  await openInEditor(page);
+  const thumbs = page.getByTestId("page-thumb");
+
+  // Opens without a password (owner restrictions only): its pages must not come out blank.
+  let chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Merge PDF" }).click();
+  await (await chooser).setFiles(fx("owner-protected.pdf"));
+  await expect(thumbs).toHaveCount(8);
+
+  // Needs a password: refused with a message, nothing inserted.
+  chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Insert PDF" }).first().click();
+  await (await chooser).setFiles(fx("encrypted.pdf"));
+  await expect(page.getByText(/That PDF is password-protected/)).toBeVisible();
+  await expect(thumbs).toHaveCount(8);
+
+  const { bytes } = await downloadPdf(page);
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), verbosity: 0 }).promise;
+  expect(doc.numPages).toBe(8);
+  const merged = await (await doc.getPage(4)).getTextContent();
+  expect(merged.items.map((i) => ("str" in i ? i.str : "")).join("")).toContain("Chapter 1");
+  expect(errors).toEqual([]);
+});
+
 test("undo after deleting a page restores the right pages", async ({ page }) => {
   const errors = trackErrors(page);
   await openInEditor(page);

@@ -82,6 +82,19 @@ function missingGlyphsMessage(replacement: string, missingCharCodes: number[]): 
   return `Can't replace with "${replacement}": this PDF's fonts can't show some of its letters, so they would appear as "?". Nothing was changed.`;
 }
 
+/**
+ * Opens a PDF whose pages are being merged or inserted. A plain parse keeps an encrypted
+ * file's streams encrypted, and copied into this document they render as blank pages, so
+ * decrypt it (empty password, as owner-only protected files allow) or refuse it.
+ */
+async function loadPdfToInsert(file: File): Promise<PDFDocumentData> {
+  const loaded = await getPdfBackend().load(new Uint8Array(await file.arrayBuffer()));
+  if (loaded.status === 'password-required') {
+    throw new Error('That PDF is password-protected. Open it on its own and remove the password, then add it here');
+  }
+  return loaded.doc;
+}
+
 /** True if the run is underlined or a thin stroke path sits under it (certificate labels). */
 function runHasPathUnderline(run: TextRun, paths: PathItem[]): boolean {
   if (run.isUnderline) return true;
@@ -5375,8 +5388,7 @@ export default function EditorPage() {
   const handleMergePdf = useCallback(async (file: File) => {
     if (!doc || !engineRef.current) return;
     try {
-      const buffer = await file.arrayBuffer();
-      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
+      const sourceDoc = await loadPdfToInsert(file);
       const insertAt = doc.pages.length;
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, insertAt);
       refreshAfterPageOp(doc);
@@ -5619,8 +5631,7 @@ export default function EditorPage() {
   const handleInsertPdf = useCallback(async (index: number, file: File) => {
     if (!doc || !engineRef.current) return;
     try {
-      const buffer = await file.arrayBuffer();
-      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
+      const sourceDoc = await loadPdfToInsert(file);
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, index);
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
       refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: sourceDoc.pages.length });
