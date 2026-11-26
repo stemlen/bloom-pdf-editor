@@ -216,7 +216,9 @@ export async function exportPageToImage(
   if (!page) throw new Error(`Page ${pageIndex} not found`);
 
   const scale = dpi / 72;
-  const result = await engine.renderPage(doc, pageIndex, { scale });
+  // The chosen DPI is the file's resolution: don't multiply it by the
+  // screen's pixel ratio (a Retina screen doubled every export).
+  const result = await engine.renderPage(doc, pageIndex, { scale, devicePixelRatio: 1 });
   const canvas = result.canvas;
 
   return new Promise<Blob>((resolve, reject) => {
@@ -277,11 +279,13 @@ export async function exportPageToSVG(
   if (!page) throw new Error(`Page ${pageIndex} not found`);
 
   const scale = 2;
-  const mediaBox = page.mediaBox;
-  const pageWidth = mediaBox.width;
-  const pageHeight = mediaBox.height;
+  // Size the SVG like the rendered page: /Rotate 90/270 swaps width and height.
+  const { mediaBox, rotate } = page;
+  const turned = rotate === 90 || rotate === 270;
+  const pageWidth = turned ? mediaBox.height : mediaBox.width;
+  const pageHeight = turned ? mediaBox.width : mediaBox.height;
 
-  const result = await engine.renderPage(doc, pageIndex, { scale });
+  const result = await engine.renderPage(doc, pageIndex, { scale, devicePixelRatio: 1 });
   const canvas = result.canvas;
   const dataUrl = canvas.toDataURL('image/png');
 

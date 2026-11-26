@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
-import { download, magic, openInEditor, text, trackErrors, zipEntries, zipText } from "./helpers";
+import { writeFileSync } from "node:fs";
+import { download, fx, magic, openInEditor, text, trackErrors, zipEntries, zipText } from "./helpers";
 
 async function openExport(page: Page) {
   await page.getByTitle("Export to Word, PNG, Markdown, etc.").click();
@@ -95,4 +96,62 @@ test("convert an edited document and a page range", async ({ page }) => {
   const { bytes } = await download(page, panel.getByTestId("export-submit"));
   expect(text(bytes)).toContain("Sales by Region");
   expect(text(bytes)).not.toContain("Quarterly Garden Report");
+});
+
+/** Width × height from a PNG's IHDR. */
+const pngSize = (b: Uint8Array) => {
+  const v = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  return { width: v.getUint32(16), height: v.getUint32(20) };
+};
+
+test.describe("render export on a high-DPI screen", () => {
+  test.use({ deviceScaleFactor: 2 });
+
+  test("PNG has the chosen DPI, not DPI × the screen's pixel ratio", async ({ page }) => {
+    await openInEditor(page);
+    const panel = await openExport(page);
+    await panel.getByRole("button", { name: /^PNG Image/ }).click();
+    await panel.getByRole("button", { name: "Page 1", exact: true }).click();
+    const { bytes } = await download(page, panel.getByTestId("export-submit"));
+    // A4 at the default 150 DPI: 595.28 × 841.89 pt → 1241 × 1754 px.
+    expect(pngSize(bytes)).toEqual({ width: 1241, height: 1754 });
+  });
+});
+
+test("SVG page image of a /Rotate 90 page keeps the page's landscape shape", async ({ page }, info) => {
+  const { PDFDocument, StandardFonts, degrees } = await import("pdf-lib");
+  const pdf = await PDFDocument.create();
+  const p = pdf.addPage([300, 500]);
+  p.setRotation(degrees(90));
+  p.drawText("Turned page", { x: 40, y: 400, size: 20, font: await pdf.embedFont(StandardFonts.Helvetica) });
+  const file = info.outputPath("rotated.pdf");
+  writeFileSync(file, await pdf.save());
+
+  await openInEditor(page, file);
+  const panel = await openExport(page);
+  await panel.getByRole("button", { name: /^SVG \(page image\)/ }).click();
+  const { bytes } = await download(page, panel.getByTestId("export-submit"));
+  const svg = text(bytes);
+  expect(svg).toMatch(/<svg[^>]*width="500" height="300" viewBox="0 0 500 300"/);
+  expect(svg).toContain('<image width="500" height="300"');
+});
+
+test("Hindi made by Chrome converts with its matras, conjuncts and invoice table", async ({ page }) => {
+  await openInEditor(page, fx("hindi-invoice.pdf"));
+  const panel = await openExport(page);
+  await panel.getByRole("button", { name: "Document convert" }).click();
+  await panel.getByRole("button", { name: /^Markdown/ }).click();
+  const md = text((await download(page, panel.getByTestId("export-submit"))).bytes);
+  expect(md).toContain("| क्रम | विवरण | मात्रा | मूल्य (₹) |");
+  expect(md).toContain("| 4 | शुद्ध घी | 5 | 480.00 |");
+  expect(md).toContain("ग्राहक: श्री राजेश कुमार, नई दिल्ली");
+  await panel.getByRole("button", { name: /^Word \(DOCX\)/ }).click();
+  const docx = (await download(page, panel.getByTestId("export-submit"))).bytes;
+  const xml = await zipText(docx, "word/document.xml");
+  expect(xml).toContain("<w:tbl>");
+  expect(xml).toContain("गेहूँ का आटा");
+  await panel.getByRole("button", { name: /^Rich Text/ }).click();
+  const rtf = text((await download(page, panel.getByTestId("export-submit"))).bytes);
+  expect(/^[\x00-\x7f]*$/.test(rtf)).toBe(true);
+  expect(rtf).toContain("\\u2350?\\u2370?\\u2354?\\u2381?\\u2351?"); // मूल्य
 });
