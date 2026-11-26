@@ -1,5 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const PORT = Number(process.env.E2E_PORT ?? 4174);
+
 // Runs against the static export in out/: `npm run build:static` first (see README → Run Tests).
 export default defineConfig({
   testDir: "./tests",
@@ -9,14 +11,14 @@ export default defineConfig({
   workers: 4,
   reporter: [["list"]],
   use: {
-    baseURL: "http://localhost:4174",
+    baseURL: `http://localhost:${PORT}`,
     acceptDownloads: true,
     trace: "retain-on-failure",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } }],
   webServer: {
-    command: "npm run serve:out",
-    url: "http://localhost:4174",
+    command: `npx serve out -l ${PORT} --no-clipboard`,
+    url: `http://localhost:${PORT}`,
     reuseExistingServer: true,
     timeout: 60_000,
   },

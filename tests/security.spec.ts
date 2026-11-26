@@ -62,9 +62,20 @@ test("inspect, strip metadata and apply a policy", async ({ page }) => {
   let { bytes } = await downloadPdf(page);
   expect((await pdfDoc(bytes)).getTitle()).toBeUndefined();
 
+  // The default "Confidential" policy encrypts with an open password the user must supply
+  // (policies never ship built-in passwords), so Apply stays disabled until one is entered.
   await panel.getByRole("button", { name: "Policy", exact: true }).click();
-  await panel.getByRole("button", { name: "Apply policy" }).click();
-  await expect(panel.getByText(/Applied policy/)).toBeVisible();
+  const apply = panel.getByRole("button", { name: "Apply policy" });
+  await expect(apply).toBeDisabled();
+  await panel.getByPlaceholder("Needed to open the PDF").fill("policy42");
+  await apply.click();
+  await expect(panel.getByText(/Applied policy: Confidential/)).toBeVisible();
+  // No owner password was given, so a generated one is shown once.
+  await expect(panel.getByTestId("generated-owner-password")).not.toBeEmpty();
   ({ bytes } = await downloadPdf(page));
-  expect(bytes.length).toBeGreaterThan(1000);
+  expect(Buffer.from(bytes).toString("latin1")).toContain("/Encrypt");
+  await expect(openWithPdfJs(bytes)).rejects.toThrow(/password/i);
+  const opened = await openWithPdfJs(bytes, "policy42");
+  expect(opened.pages).toBe(3);
+  expect(opened.text).toContain("Quarterly Garden Report");
 });

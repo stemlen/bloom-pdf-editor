@@ -266,8 +266,11 @@ test.describe("watermark & security extras", () => {
     await panel.getByRole("button", { name: "Clean", exact: true }).click();
     await panel.getByRole("button", { name: "Sanitize document" }).click();
     await expect(panel.getByText(/sanitiz/i).last()).toBeVisible();
+    // Sanitize already removed any attachments (and sample.pdf has none), so this
+    // reports that there is nothing left; removing real attachments is covered in
+    // security.spec.ts.
     await panel.getByRole("button", { name: "Remove attachments" }).click();
-    await expect(panel.getByText(/Removed \d+ attachment/)).toBeVisible();
+    await expect(panel.getByText("No attachments to remove")).toBeVisible();
     await panel.getByRole("button", { name: "Optimize (keep security)" }).click();
     const { bytes } = await downloadPdf(page);
     expect((await openWithPdfJs(bytes)).pages).toBe(3);
