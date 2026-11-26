@@ -613,16 +613,7 @@ export function expandAndClassifyBlock(
       // Each part keeps the bounds of the runs it came from, not the whole
       // line's first/last run, so it sits where it is on the page.
       const labelEnd = slice.text.indexOf(labeled.label) + labeled.label.length;
-      const labelRuns: Run[] = [];
-      const contentRuns: Run[] = [];
-      let offset = 0;
-      for (const r of slice.runs) {
-        if (offset < labelEnd) labelRuns.push(r);
-        if (offset + r.text.length > labelEnd && r.text.slice(Math.max(0, labelEnd - offset)).trim()) {
-          contentRuns.push(r);
-        }
-        offset += r.text.length;
-      }
+      const contentStart = slice.text.indexOf(labeled.content, labelEnd);
       const labelSlice: { text: string; runs: Run[] } = {
         text: labeled.label,
         runs: [
@@ -630,7 +621,7 @@ export function expandAndClassifyBlock(
             ...(slice.runs[0]!),
             id: createId('run'),
             text: labeled.label,
-            bbox: unionRunBounds(labelRuns) ?? slice.runs[0]!.bbox,
+            bbox: textRangeBounds(slice.runs, 0, labelEnd) ?? slice.runs[0]!.bbox,
             wordIds: [] as string[],
             characterIds: [] as string[],
           },
@@ -645,7 +636,7 @@ export function expandAndClassifyBlock(
             ...(slice.runs[slice.runs.length - 1] ?? slice.runs[0]!),
             id: createId('run'),
             text: labeled.content,
-            bbox: unionRunBounds(contentRuns) ?? slice.runs[slice.runs.length - 1]?.bbox,
+            bbox: textRangeBounds(slice.runs, contentStart, slice.text.length) ?? slice.runs[slice.runs.length - 1]?.bbox,
             wordIds: [] as string[],
             characterIds: [] as string[],
           },
@@ -858,6 +849,26 @@ function ctxFromLineSlices(
   const first = 'runs' in ctx.block ? ctx.block.runs.find((r) => r.text.trim() && r.fontSize) : undefined;
   const sameStyle = own && first && own.fontSize === first.fontSize && own.fontName === first.fontName;
   return { ...ctx, block, styleProfile: sameStyle ? ctx.styleProfile : undefined };
+}
+
+/**
+ * Bounds of the characters [from, to) of a line made of `runs`. A run's box is
+ * shared out evenly among its characters, so a label and its value split from
+ * one run still get their own (approximate) places on the line.
+ */
+function textRangeBounds(runs: Run[], from: number, to: number): Block['bbox'] | undefined {
+  const parts: Run[] = [];
+  let offset = 0;
+  for (const r of runs) {
+    const start = offset;
+    offset += r.text.length;
+    const lo = Math.max(from, start);
+    const hi = Math.min(to, offset);
+    if (hi <= lo || !r.bbox || r.text.length === 0) continue;
+    const per = r.bbox.width / r.text.length;
+    parts.push({ ...r, bbox: { ...r.bbox, x: r.bbox.x + (lo - start) * per, width: (hi - lo) * per } });
+  }
+  return unionRunBounds(parts);
 }
 
 /** Bounds of the given runs, so a line split from a page-sized block keeps its own position. */

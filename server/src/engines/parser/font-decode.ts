@@ -134,7 +134,13 @@ async function loadOneFont(
   dict: PdfDict,
   objects: Map<string, PdfPrimitive>,
 ): Promise<LoadedFont> {
-  const baseFont = dict.getName('BaseFont') ?? resourceName;
+  // Type3 fonts have no /BaseFont; their descriptor still names the face
+  // (Chrome: "BAAAAA+KohinoorDevanagari-Bold"), which bold/italic detection and
+  // exporters need — the resource name ("F4") says nothing.
+  const baseFont =
+    dict.getName('BaseFont') ??
+    resolveDict(dict.get('FontDescriptor'), objects)?.getName('FontName') ??
+    resourceName;
   const subtype = dict.getName('Subtype') ?? 'Type1';
   let encoding = '';
   let differences = new Map<number, string>();

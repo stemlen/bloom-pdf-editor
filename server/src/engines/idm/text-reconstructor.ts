@@ -95,7 +95,8 @@ export function reconstructText(input: {
     if (i > 0) {
       const prev = sorted[i - 1]!;
       const fs = Math.max(prev.fontSize, c.fontSize, 1);
-      const sameLine = Math.abs(c.bbox.y - prev.bbox.y) <= fs * 0.35;
+      // One text-showing operation is one baseline, turned or not.
+      const sameLine = prev.parentId === c.parentId || Math.abs(c.bbox.y - prev.bbox.y) <= fs * 0.35;
       const gap = c.bbox.x - (prev.bbox.x + prev.bbox.width);
       // Space glyphs are often dropped from layout sourceObjectIds; the leftover
       // gap is typically ~0.25–0.35em. Use 0.2em so we recover those without

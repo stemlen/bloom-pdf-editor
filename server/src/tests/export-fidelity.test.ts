@@ -132,6 +132,20 @@ describe('content stream geometry', () => {
     expect(txt.indexOf('Landscape heading')).toBeLessThan(txt.indexOf('Second row'));
   });
 
+  it('reads turned text (a 45° watermark, a sideways label) as words, not one glyph per line', async () => {
+    const pdf = buildPdf({
+      content: [
+        'BT /F1 12 Tf 72 700 Td (Body text of the page) Tj ET',
+        'q .7071 .7071 -.7071 .7071 200 300 cm BT /F2 36 Tf 0 0 Td (CONFIDENTIAL) Tj ET Q',
+        'q 0 1 -1 0 560 200 cm BT /F1 10 Tf 0 0 Td (Side label text) Tj ET Q',
+      ].join('\n'),
+    });
+    const txt = decode(await convert(pdf, 'txt'));
+    expect(txt).toContain('CONFIDENTIAL');
+    expect(txt).toContain('Side label text');
+    expect(txt).toContain('Body text of the page');
+  });
+
   it('keeps a paragraph that sits just under a picture', async () => {
     const pdf = buildPdf({
       image: true,

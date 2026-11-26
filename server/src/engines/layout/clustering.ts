@@ -168,6 +168,13 @@ function clusterWords(characters: NormalizedChar[], pageIndex: number): Clustere
     }
     const prev = current[current.length - 1]!;
     const sameLine = Math.abs(ch.baseline - prev.baseline) <= Math.max(2, prev.fontSize * 0.25);
+    // Glyphs of one text-showing operation share a baseline even when it is
+    // turned (a 45° watermark, sideways text): keep such a run together as one
+    // unit, spaces included, instead of one "line" per glyph in reverse order.
+    if (!sameLine && ch.sourceRunId != null && ch.sourceRunId === prev.sourceRunId) {
+      current.push(ch);
+      continue;
+    }
     const gap = ch.bbox.x - (prev.bbox.x + prev.bbox.width);
     const threshold = Math.max(prev.fontSize, ch.fontSize) * 0.35;
     // Touching glyphs stay one word across a font switch: subsetting producers
