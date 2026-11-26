@@ -82,13 +82,91 @@ test("rotate, insert blank, delete and insert another PDF — all saved in the d
 test("reorder pages by dragging thumbnails", async ({ page }) => {
   await openInEditor(page);
   const thumbs = page.getByTestId("page-thumb");
-  await thumbs.nth(2).dragTo(thumbs.nth(0));
+  // At 1440x900 the three thumbnails don't fit in the sidebar at once. A drag has to start
+  // and end on screen (Playwright can't scroll mid-drag the way a user's drag auto-scrolls),
+  // so scroll page 3 to the bottom edge, which leaves the lower part of page 1 visible.
+  await thumbs.nth(2).evaluate((el) => el.scrollIntoView({ block: "end" }));
+  const box = (await thumbs.nth(0).boundingBox())!;
+  await thumbs.nth(2).dragTo(thumbs.nth(0), {
+    sourcePosition: { x: box.width / 2, y: 40 },
+    targetPosition: { x: box.width / 2, y: box.height - 30 },
+  });
+  await expect(page.getByTestId("unsaved-badge")).toBeVisible();
   await expect(thumbs.nth(0).getByAltText("Page 1")).toBeVisible();
   const { bytes } = await downloadPdf(page);
   const text = await pdfText(bytes);
   // Appendix (old page 3) now comes before the report.
   expect(text.indexOf("Appendix")).toBeGreaterThanOrEqual(0);
   expect(text.indexOf("Appendix")).toBeLessThan(text.indexOf("Quarterly Garden Report"));
+});
+
+test("merging encrypted PDFs: owner-protected pages keep their content, password-protected ones are refused", async ({ page }) => {
+  const errors = trackErrors(page);
+  await openInEditor(page);
+  const thumbs = page.getByTestId("page-thumb");
+
+  // Opens without a password (owner restrictions only): its pages must not come out blank.
+  let chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Merge PDF" }).click();
+  await (await chooser).setFiles(fx("owner-protected.pdf"));
+  await expect(thumbs).toHaveCount(8);
+
+  // Needs a password: refused with a message, nothing inserted.
+  chooser = page.waitForEvent("filechooser");
+  await page.getByRole("button", { name: "Insert PDF" }).first().click();
+  await (await chooser).setFiles(fx("encrypted.pdf"));
+  await expect(page.getByText(/That PDF is password-protected/)).toBeVisible();
+  await expect(thumbs).toHaveCount(8);
+
+  const { bytes } = await downloadPdf(page);
+  const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), verbosity: 0 }).promise;
+  expect(doc.numPages).toBe(8);
+  const merged = await (await doc.getPage(4)).getTextContent();
+  expect(merged.items.map((i) => ("str" in i ? i.str : "")).join("")).toContain("Chapter 1");
+  expect(errors).toEqual([]);
+});
+
+test("undo after deleting a page restores the right pages", async ({ page }) => {
+  const errors = trackErrors(page);
+  await openInEditor(page);
+  // Replace All touches pages 1 and 3 ("page layout", "third page", "page tools").
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByPlaceholder("Search text in PDF…").fill("page");
+  await page.getByPlaceholder("Replace with…").fill("leaf");
+  await page.getByRole("button", { name: "Replace All" }).click();
+  await expect(page.getByTestId("match-count")).toHaveText("No matches");
+
+  const thumbs = page.getByTestId("page-thumb");
+  await thumbs.nth(0).hover();
+  await thumbs.nth(0).getByRole("button", { name: "Delete page" }).click();
+  await page.getByTestId("confirm-dialog").getByRole("button", { name: "Delete page" }).click();
+  await expect(thumbs).toHaveCount(2);
+
+  // Undo the Replace All: only the old page 3 (now page 2) has something to restore.
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByTestId("page-indicator")).toHaveText("2 / 2");
+  const text = await pdfText((await downloadPdf(page)).bytes);
+  expect(text).toContain("1,200.50"); // Sales, untouched
+  expect(text).toContain("third page gives page tools");
+  expect(text).not.toContain("Quarterly Garden Report"); // deleted, must not come back over Sales
+  expect(errors).toEqual([]);
+});
+
+test("thumbnails follow text edits, and only the edited page is redrawn", async ({ page }) => {
+  await openInEditor(page);
+  const thumbs = page.getByTestId("page-thumb").locator("img");
+  await expect(thumbs).toHaveCount(3);
+  const srcs = () => thumbs.evaluateAll((els) => els.map((e) => (e as HTMLImageElement).src));
+  const before = await srcs();
+
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByPlaceholder("Search text in PDF…").fill("Quarterly Garden Report");
+  await page.getByPlaceholder("Replace with…").fill("WWWWWWWWWWWWWWWWWWWWWWWW");
+  await page.getByRole("button", { name: "Replace All" }).click();
+
+  await expect.poll(async () => (await srcs())[0]).not.toBe(before[0]);
+  expect((await srcs()).slice(1)).toEqual(before.slice(1));
 });
 
 test("close clears the document and returns home", async ({ page }) => {

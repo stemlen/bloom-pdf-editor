@@ -22,12 +22,12 @@ import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, Te
 import type { EditorTool, ToolDef, PathType, DrawnPath, FloatingText, FloatingImage, DrawMode, RemovedImageRecord } from './types';
 import { TOOLS } from './types';
 import {
-  canvasToPdf, pdfToCanvas, hexToRGB,
+  canvasToPdf, pdfToCanvas, pdfBoxToCanvasRect, hexToRGB,
   hitTestTextLine, findNearestTextLine, caretIndexFromLineX,
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
 } from './utils';
-import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
+import { PDFRef, getPageContentBytes, interpretPage, findTextMatches, textMatchBounds, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
 import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, unsupportedStandardFontChars, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
 
@@ -75,6 +75,34 @@ export interface SearchMatch {
   runText: string;
 }
 
+
+/**
+ * Find & Replace writes the replacement with the matched text's font, or Helvetica when that
+ * font lacks a letter. Neither has Devanagari, CJK and similar scripts, so those letters
+ * would come out as "?" boxes. Returns the message to show instead, or null if all is fine.
+ */
+function missingGlyphsMessage(replacement: string, missingCharCodes: number[]): string | null {
+  if (missingCharCodes.length === 0) return null;
+  return `Can't replace with "${replacement}": this PDF's fonts can't show some of its letters, so they would appear as "?". Nothing was changed.`;
+}
+
+/**
+ * Opens a PDF whose pages are being merged or inserted. A plain parse keeps an encrypted
+ * file's streams encrypted, and copied into this document they render as blank pages, so
+ * decrypt it (empty password, as owner-only protected files allow) or refuse it.
+ */
+async function loadPdfToInsert(file: File): Promise<PDFDocumentData> {
+  const loaded = await getPdfBackend().load(new Uint8Array(await file.arrayBuffer()));
+  if (loaded.status === 'password-required') {
+    throw new Error('That PDF is password-protected. Open it on its own and remove the password, then add it here');
+  }
+  return loaded.doc;
+}
+
+/** A page's content stream objects. Edits store new stream objects, so identity tells if it changed. */
+function pageContentStreams(doc: PDFDocumentData, pageIndex: number): PDFObject[] {
+  return doc.pages[pageIndex].contentRefs.map((ref) => doc.objects.get(ref.toKey()) as PDFObject);
+}
 
 /** True if the run is underlined or a thin stroke path sits under it (certificate labels). */
 function runHasPathUnderline(run: TextRun, paths: PathItem[]): boolean {
@@ -332,6 +360,8 @@ export default function EditorPage() {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [thumbnailKey, setThumbnailKey] = useState(0);
   const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
+  /** Per page, the content streams its thumbnail was drawn from (see pageContentStreams). */
+  const thumbnailSourcesRef = useRef<PDFObject[][]>([]);
 
   const [activeTool, setActiveTool] = useState<EditorTool>('text');
   /** Redaction marks placed on the current page and not applied yet. */
@@ -1249,16 +1279,21 @@ export default function EditorPage() {
       setIsGeneratingThumbnails(true);
       const engine = engineRef.current!;
       const thumbs: string[] = [];
+      const sources: PDFObject[][] = [];
 
       try {
         for (let i = 0; i < doc!.pages.length; i++) {
           if (cancelled) break;
+          sources.push(pageContentStreams(doc!, i));
           // Render at 15% scale for a quick thumbnail
           const res = await engine.renderPage(doc!, i, { scale: 0.15, renderText: true, renderPaths: true, renderImages: true });
           if (cancelled) break;
           thumbs.push(res.canvas.toDataURL('image/jpeg', 0.6));
         }
-        if (!cancelled) setThumbnails(thumbs);
+        if (!cancelled) {
+          thumbnailSourcesRef.current = sources;
+          setThumbnails(thumbs);
+        }
       } catch (e) {
         console.error('[Editor] Thumbnail generation failed:', e);
       } finally {
@@ -1274,6 +1309,37 @@ export default function EditorPage() {
       setIsGeneratingThumbnails(false);
     };
   }, [doc, thumbnailKey]);
+
+  // Content edits (text, Replace All, redaction…) swap a page's content stream but keep the
+  // same `doc` object, so the effect above doesn't rerun. Redraw just the thumbnails whose
+  // content changed, once edits settle.
+  useEffect(() => {
+    if (!doc || !engineRef.current || isGeneratingThumbnails) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const sources = thumbnailSourcesRef.current;
+      if (sources.length !== doc.pages.length) return;
+      const updated = new Map<number, { url: string; source: PDFObject[] }>();
+      for (let i = 0; i < doc.pages.length; i++) {
+        const now = pageContentStreams(doc, i);
+        if (now.length === sources[i].length && now.every((s, k) => s === sources[i][k])) continue;
+        try {
+          const res = await engineRef.current!.renderPage(doc, i, { scale: 0.15, renderText: true, renderPaths: true, renderImages: true });
+          if (cancelled) return;
+          updated.set(i, { url: res.canvas.toDataURL('image/jpeg', 0.6), source: now });
+        } catch (e) {
+          console.warn('[Editor] Thumbnail refresh failed:', e);
+        }
+      }
+      if (cancelled || updated.size === 0) return;
+      for (const [i, { source }] of updated) sources[i] = source;
+      setThumbnails((prev) => prev.map((t, i) => updated.get(i)?.url ?? t));
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [doc, renderKey, isGeneratingThumbnails]);
 
   // Reset edit state when doc or page changes. Both change from many places
   // (load, navigation, page operations), and the reset also clears refs
@@ -2538,7 +2604,6 @@ export default function EditorPage() {
     if (!doc || !findText.trim()) return [];
 
     const query = findText.trim();
-    const lowerQuery = caseSensitive ? query : query.toLowerCase();
     const matches: SearchMatch[] = [];
 
     for (let p = 0; p < doc.pages.length; p++) {
@@ -2547,41 +2612,20 @@ export default function EditorPage() {
         const bytes = getPageContentBytes(page, doc.objects);
         const interpreted = interpretPage(bytes, page, doc.objects);
 
-        for (const run of interpreted.textRuns) {
-          const text = run.text;
-          const textToSearch = caseSensitive ? text : text.toLowerCase();
-          let idx = 0;
-          while ((idx = textToSearch.indexOf(lowerQuery, idx)) !== -1) {
-            const endIdx = idx + query.length;
-            let pdfX = run.x;
-            let pdfWidth = run.width;
-
-            if (run.glyphs && run.glyphs.length === run.text.length) {
-              const startG = run.glyphs[idx];
-              const endG = run.glyphs[endIdx - 1];
-              if (startG && endG) {
-                pdfX = startG.x;
-                pdfWidth = (endG.x + endG.width) - startG.x;
-              }
-            } else if (run.text.length > 0) {
-              const charW = run.width / run.text.length;
-              pdfX = run.x + idx * charW;
-              pdfWidth = query.length * charW;
-            }
-
-            matches.push({
-              id: `m-${p}-${idx}-${matches.length}`,
-              pageIndex: p,
-              pdfX,
-              pdfY: run.y,
-              pdfWidth: Math.max(pdfWidth, 3),
-              pdfHeight: run.height || run.fontSize || 12,
-              matchedText: text.substring(idx, endIdx),
-              runText: text,
-            });
-
-            idx += Math.max(query.length, 1);
-          }
+        // Same matcher as Replace (findAndReplace), so the counter and the replaced
+        // occurrence always agree; it also finds words split across text runs.
+        for (const match of findTextMatches(interpreted.textRuns, query, caseSensitive)) {
+          const box = textMatchBounds(match);
+          matches.push({
+            id: `m-${p}-${match.start}-${matches.length}`,
+            pageIndex: p,
+            pdfX: box.x,
+            pdfY: box.y,
+            pdfWidth: Math.max(box.width, 3),
+            pdfHeight: box.height,
+            matchedText: match.chain.text.substring(match.start, match.end),
+            runText: match.chain.text,
+          });
         }
       } catch (e) {
         console.warn(`[Search] Error on page ${p}:`, e);
@@ -2636,6 +2680,11 @@ export default function EditorPage() {
         .slice(0, activeMatchIndex)
         .filter((m) => m.pageIndex === currentMatch.pageIndex).length;
       const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive, occurrence);
+      const unshowable = missingGlyphsMessage(replaceText, result.missingCharCodes);
+      if (unshowable) {
+        setError(unshowable);
+        return;
+      }
       if (result.newContentBytes && result.newContentBytes !== bytes) {
         ensureHistoryBaseline(currentMatch.pageIndex);
         await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
@@ -2658,13 +2707,21 @@ export default function EditorPage() {
       // Work out every page's replacement first, then record the batch so a
       // single Undo reverts all pages at once (BE-203).
       const changes: { pageIndex: number; bytes: Uint8Array }[] = [];
+      const missing: number[] = [];
       for (let p = 0; p < doc.pages.length; p++) {
         const page = doc.pages[p];
         const bytes = engine.getPageContentBytes(page, doc.objects);
         const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive);
+        missing.push(...result.missingCharCodes);
         if (result.newContentBytes && result.newContentBytes !== bytes) {
           changes.push({ pageIndex: p, bytes: result.newContentBytes });
         }
+      }
+      // All or nothing: don't replace on some pages and leave "?" boxes on others.
+      const unshowable = missingGlyphsMessage(replaceText, missing);
+      if (unshowable) {
+        setError(unshowable);
+        return;
       }
       for (const { pageIndex } of changes) {
         if (!historyRef.current.hasPage(pageIndex)) pushEditorHistory('baseline', undefined, pageIndex);
@@ -5327,7 +5384,16 @@ export default function EditorPage() {
   }, [router]);
 
   // ── Page Operations ──
-  const refreshAfterPageOp = useCallback((nextDoc: PDFDocumentData, nextCurrentPage?: number) => {
+  const refreshAfterPageOp = useCallback((
+    nextDoc: PDFDocumentData,
+    nextCurrentPage?: number,
+    pageChange?: Parameters<EditorHistory['applyPageChange']>[0],
+  ) => {
+    // Undo entries are keyed by page index: renumber them with the pages.
+    if (pageChange) {
+      historyRef.current.applyPageChange(pageChange);
+      syncTxState();
+    }
     setDoc({ ...nextDoc });
     setTotalPages(nextDoc.pages.length);
     if (nextCurrentPage != null) {
@@ -5338,7 +5404,7 @@ export default function EditorPage() {
     setIsDirty(true);
     setRenderKey((k) => k + 1);
     setThumbnailKey((k) => k + 1);
-  }, [currentPage]);
+  }, [currentPage, syncTxState]);
 
   const downloadPdfBytes = useCallback((bytes: Uint8Array, name: string) => {
     const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
@@ -5360,7 +5426,7 @@ export default function EditorPage() {
       } else if (currentPage > index) {
         nextPage = currentPage - 1;
       }
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'delete', index });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t delete the page', e));
     }
@@ -5388,7 +5454,7 @@ export default function EditorPage() {
       } else if (currentPage >= toIndex && currentPage < fromIndex) {
         nextPage = currentPage + 1;
       }
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'move', from: fromIndex, to: toIndex });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t reorder the pages', e));
     }
@@ -5397,8 +5463,7 @@ export default function EditorPage() {
   const handleMergePdf = useCallback(async (file: File) => {
     if (!doc || !engineRef.current) return;
     try {
-      const buffer = await file.arrayBuffer();
-      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
+      const sourceDoc = await loadPdfToInsert(file);
       const insertAt = doc.pages.length;
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, insertAt);
       refreshAfterPageOp(doc);
@@ -5632,7 +5697,7 @@ export default function EditorPage() {
     try {
       engineRef.current.insertBlankPage(doc, index);
       const nextPage = currentPage >= index ? currentPage + 1 : currentPage;
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: 1 });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t insert a blank page', e));
     }
@@ -5641,11 +5706,10 @@ export default function EditorPage() {
   const handleInsertPdf = useCallback(async (index: number, file: File) => {
     if (!doc || !engineRef.current) return;
     try {
-      const buffer = await file.arrayBuffer();
-      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
+      const sourceDoc = await loadPdfToInsert(file);
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, index);
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: sourceDoc.pages.length });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t insert the PDF', e));
     }
@@ -6428,16 +6492,14 @@ export default function EditorPage() {
               .filter(m => m.pageIndex === currentPage)
               .map((m) => {
                 const isCurrent = searchResults[activeMatchIndex]?.id === m.id;
-                const mediaBox = doc?.pages[currentPage]?.mediaBox;
-                const pageH = mediaBox?.height || 0;
-                const mbX = mediaBox?.x || 0;
-                const mbY = mediaBox?.y || 0;
-
-                const { cssX: x1, cssY: y1 } = pdfToCanvas(m.pdfX, m.pdfY + m.pdfHeight, scale, pageH, mbX, mbY);
-                const { cssX: x2, cssY: y2 } = pdfToCanvas(m.pdfX + m.pdfWidth, m.pdfY, scale, pageH, mbX, mbY);
-
-                const w = Math.max(Math.abs(x2 - x1), 4);
-                const h = Math.max(Math.abs(y2 - y1), 8);
+                const pageInfo = doc?.pages[currentPage];
+                if (!pageInfo) return null;
+                // Turned with the page on /Rotate pages, like the renderer does.
+                const rect = pdfBoxToCanvasRect(
+                  { x: m.pdfX, y: m.pdfY, width: m.pdfWidth, height: m.pdfHeight },
+                  pageInfo,
+                  scale,
+                );
 
                 return (
                   <div
@@ -6447,11 +6509,12 @@ export default function EditorPage() {
                         ? 'bg-amber-400/80 border-2 border-amber-600 ring-4 ring-amber-400/40 shadow-lg scale-[1.04] z-30'
                         : 'bg-yellow-300/45 border border-yellow-500/80 shadow-sm z-20 hover:bg-yellow-300/70'
                     }`}
+                    data-testid="search-highlight"
                     style={{
-                      left: Math.min(x1, x2),
-                      top: Math.min(y1, y2),
-                      width: w,
-                      height: h,
+                      left: rect.left,
+                      top: rect.top,
+                      width: Math.max(rect.width, 4),
+                      height: Math.max(rect.height, 4),
                     }}
                   />
                 );

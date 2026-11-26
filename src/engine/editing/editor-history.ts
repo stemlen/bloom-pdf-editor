@@ -221,6 +221,30 @@ export function parseOverlaySnapshot<T = unknown>(json: string): T {
   }
 }
 
+/** A change to the page order or count. Rotation keeps indices, so it isn't one. */
+export type PageStructureChange =
+  | { kind: 'delete'; index: number }
+  | { kind: 'move'; from: number; to: number }
+  | { kind: 'insert'; index: number; count: number };
+
+/** Where page `pageIndex` ends up after `change`; null if it was deleted. */
+export function mapPageIndex(change: PageStructureChange, pageIndex: number): number | null {
+  switch (change.kind) {
+    case 'delete':
+      if (pageIndex === change.index) return null;
+      return pageIndex > change.index ? pageIndex - 1 : pageIndex;
+    case 'insert':
+      return pageIndex >= change.index ? pageIndex + change.count : pageIndex;
+    case 'move': {
+      const { from, to } = change;
+      if (pageIndex === from) return to;
+      if (from < to && pageIndex > from && pageIndex <= to) return pageIndex - 1;
+      if (from > to && pageIndex >= to && pageIndex < from) return pageIndex + 1;
+      return pageIndex;
+    }
+  }
+}
+
 export class EditorHistory {
   private undoStack: EditorHistoryEntry[] = [];
   private redoStack: EditorHistoryEntry[] = [];
@@ -311,6 +335,24 @@ export class EditorHistory {
       applied.push(next);
     }
     return applied;
+  }
+
+  /**
+   * Follow a page-structure change (delete, move, insert). Entries are keyed by page index,
+   * so without this an Undo after deleting page 1 would write page 1's old content over
+   * what is now page 1 (the old page 2). Entries of a deleted page are dropped.
+   */
+  applyPageChange(change: PageStructureChange): void {
+    const remap = (stack: EditorHistoryEntry[]) => {
+      const out: EditorHistoryEntry[] = [];
+      for (const entry of stack) {
+        const next = mapPageIndex(change, entry.pageIndex);
+        if (next != null) out.push(next === entry.pageIndex ? entry : { ...entry, pageIndex: next });
+      }
+      return out;
+    };
+    this.undoStack = remap(this.undoStack);
+    this.redoStack = remap(this.redoStack);
   }
 
   /** True if any undo entry describes the given page. */
