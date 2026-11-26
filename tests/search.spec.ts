@@ -23,12 +23,12 @@ test("find text across pages, replace one match, then replace all", async ({ pag
   await expect(page.getByTestId("page-indicator")).toHaveText("3 / 3");
 
   // Replace only the current match.
-  await page.getByPlaceholder("Replace with...").fill("sheet");
+  await page.getByPlaceholder("Replace with…").fill("sheet");
   await page.getByRole("button", { name: "Replace", exact: true }).click();
   await expect(count).toHaveText(/^\d\/2$/);
 
   await find.fill("Bloom");
-  await page.getByPlaceholder("Replace with...").fill("Blossom");
+  await page.getByPlaceholder("Replace with…").fill("Blossom");
   await page.getByRole("button", { name: "Replace All" }).click();
   await expect(count).toHaveText("No matches");
   await expect(page.getByTestId("unsaved-badge")).toBeVisible();

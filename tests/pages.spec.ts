@@ -82,7 +82,16 @@ test("rotate, insert blank, delete and insert another PDF — all saved in the d
 test("reorder pages by dragging thumbnails", async ({ page }) => {
   await openInEditor(page);
   const thumbs = page.getByTestId("page-thumb");
-  await thumbs.nth(2).dragTo(thumbs.nth(0));
+  // At 1440x900 the three thumbnails don't fit in the sidebar at once. A drag has to start
+  // and end on screen (Playwright can't scroll mid-drag the way a user's drag auto-scrolls),
+  // so scroll page 3 to the bottom edge, which leaves the lower part of page 1 visible.
+  await thumbs.nth(2).evaluate((el) => el.scrollIntoView({ block: "end" }));
+  const box = (await thumbs.nth(0).boundingBox())!;
+  await thumbs.nth(2).dragTo(thumbs.nth(0), {
+    sourcePosition: { x: box.width / 2, y: 40 },
+    targetPosition: { x: box.width / 2, y: box.height - 30 },
+  });
+  await expect(page.getByTestId("unsaved-badge")).toBeVisible();
   await expect(thumbs.nth(0).getByAltText("Page 1")).toBeVisible();
   const { bytes } = await downloadPdf(page);
   const text = await pdfText(bytes);
