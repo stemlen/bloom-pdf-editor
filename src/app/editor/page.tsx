@@ -22,7 +22,7 @@ import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, Te
 import type { EditorTool, ToolDef, PathType, DrawnPath, FloatingText, FloatingImage, DrawMode, RemovedImageRecord } from './types';
 import { TOOLS } from './types';
 import {
-  canvasToPdf, pdfToCanvas, hexToRGB,
+  canvasToPdf, displayBoxToPage, pdfToCanvas, hexToRGB,
   hitTestTextLine, findNearestTextLine, caretIndexFromLineX,
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
@@ -46,6 +46,8 @@ import { CertificateImportDialog } from './components/signatures/CertificateImpo
 import { WatermarkPreview } from './components/WatermarkPreview';
 import { hitTestDrawnPath, drawnPathBounds } from './drawingHitTest';
 import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
+import { rasterizeTextLine } from '@/lib/complexTextRaster';
+import pako from 'pako';
 import { ConfirmDialogHost, confirmDialog, noticeDialog } from './components/ConfirmDialog';
 import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
@@ -482,6 +484,7 @@ export default function EditorPage() {
   const [watermarkImageFile, setWatermarkImageFile] = useState<File | null>(null);
   const [watermarkImageBytes, setWatermarkImageBytes] = useState<Uint8Array | null>(null);
   const [watermarkImageDims, setWatermarkImageDims] = useState<{ width: number; height: number } | null>(null);
+  const [watermarkImageAlpha, setWatermarkImageAlpha] = useState<{ widthPx: number; heightPx: number; data: Uint8Array; samples: Uint8Array } | null>(null);
   const [watermarkBlendMode, setWatermarkBlendMode] = useState('Normal');
 
   const [detectedWatermarks, setDetectedWatermarks] = useState<DetectedWatermark[] | null>(null);
@@ -1102,6 +1105,8 @@ export default function EditorPage() {
 
         const engine = await import('@/engine');
         engineRef.current = engine;
+        // Form values in scripts Helvetica can't draw (Hindi, CJK…) are shaped by the browser.
+        engine.setComplexTextRasterizer(rasterizeTextLine);
         setEngineModule(engine);
 
         // Prefer dirty session recovery ONLY when it matches the current document file name
@@ -2662,7 +2667,7 @@ export default function EditorPage() {
       const words = await adapter.recognize(imageData);
       const page = doc.pages[currentPage];
       const dpr = window.devicePixelRatio || 1;
-      const mapped = mapOcrWordsToPdf(words, page.mediaBox.height, scale, page.mediaBox.y, dpr);
+      const mapped = mapOcrWordsToPdf(words, page.mediaBox.height, scale, page.mediaBox.y, dpr, page.mediaBox.x);
       if (mapped.length > 0) {
         await engineRef.current.insertInvisibleTextLayer(doc, currentPage, mapped);
         setIsDirty(true);
@@ -2687,6 +2692,8 @@ export default function EditorPage() {
       const engine = engineRef.current;
       await engine.flattenFormFieldsOnPage(doc, currentPage, formFields);
       pushEditorHistory('flatten-forms');
+      // Without this, a download right after flattening returned the original file.
+      setIsDirty(true);
       setFormFields([]);
       setSelectedFormField(null);
       setFormFieldDraft('');
@@ -2697,7 +2704,7 @@ export default function EditorPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, formFields, pushEditorHistory]);
+  }, [doc, currentPage, formFields, pushEditorHistory, setIsDirty]);
 
   /**
    * Set when Shift+Enter is pressed mid-edit: the edit is committed first, and
@@ -3444,6 +3451,7 @@ export default function EditorPage() {
         renderResult?.pageWidth || page.mediaBox.width,
         pageHeight,
         page.mediaBox.x, page.mediaBox.y,
+        page.rotate,
       );
 
       for (const p of paths) {
@@ -3536,7 +3544,8 @@ export default function EditorPage() {
 
       if (fTexts.length > 0 || fImages.length > 0) {
         const contentBytes = engine.getPageContentBytes(page, doc.objects);
-        let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
+        // Text boxes and images are placed in default user space (Chromium PDFs leave a flipped CTM).
+        let newContentBytes: Uint8Array = engine.isolateGraphicsState(new Uint8Array(contentBytes));
 
         for (const ft of fTexts) {
           if (!ft.text.trim()) continue;
@@ -3550,15 +3559,17 @@ export default function EditorPage() {
         }
 
         for (const fi of fImages) {
+          // On a /Rotate page the box is turned into the page's own space.
+          const at = displayBoxToPage(fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight, page, page.mediaBox.height);
           const { newContentBytes: b } = await engine.insertImageRun(
             newContentBytes, page, doc.objects,
-            fi.dataUrl, fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight,
+            fi.dataUrl, at.x, at.yTop, fi.pdfWidth, fi.pdfHeight,
             () => {
               const num = currentObjNum;
               currentObjNum++;
               return num;
             },
-            fi.rotation || 0
+            (fi.rotation || 0) + at.rotation
           );
           newContentBytes = b;
         }
@@ -3667,6 +3678,7 @@ export default function EditorPage() {
       renderResult?.pageWidth || page.mediaBox.width,
       pageHeight,
       page.mediaBox.x, page.mediaBox.y,
+      page.rotate,
     );
 
     for (const p of paths) {
@@ -3757,7 +3769,8 @@ export default function EditorPage() {
     if (texts.length > 0 || images.length > 0) {
       isolateResources(page);
       const contentBytes = engine.getPageContentBytes(page, exportDoc.objects);
-      let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
+      // Text boxes and images are placed in default user space (Chromium PDFs leave a flipped CTM).
+      let newContentBytes: Uint8Array = engine.isolateGraphicsState(new Uint8Array(contentBytes));
 
       for (const ft of texts) {
         if (!ft.text.trim()) continue;
@@ -3768,11 +3781,12 @@ export default function EditorPage() {
       }
 
       for (const fi of images) {
+        const at = displayBoxToPage(fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight, page, page.mediaBox.height);
         const { newContentBytes: b } = await engine.insertImageRun(
           newContentBytes, page, exportDoc.objects,
-          fi.dataUrl, fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight,
+          fi.dataUrl, at.x, at.yTop, fi.pdfWidth, fi.pdfHeight,
           () => currentObjNum++,
-          fi.rotation || 0
+          (fi.rotation || 0) + at.rotation
         );
         newContentBytes = b;
       }
@@ -3799,11 +3813,12 @@ export default function EditorPage() {
         const src = library.get(sig.appearanceId)?.imageDataUrl;
         if (!src) continue;
         // Signature rotation is counter-clockwise; insertImageRun rotates clockwise.
+        const at = displayBoxToPage(sig.x, sig.y + sig.height, sig.width, sig.height, sigPage);
         const { newContentBytes } = await engine.insertImageRun(
           bytes, sigPage, exportDoc.objects,
-          src, sig.x, sig.y + sig.height, sig.width, sig.height,
+          src, at.x, at.yTop, sig.width, sig.height,
           () => currentObjNum++,
-          -(sig.rotation || 0),
+          -(sig.rotation || 0) + at.rotation,
           { preserveAlpha: true, opacity: sig.opacity },
         );
         bytes = newContentBytes;
@@ -4834,7 +4849,9 @@ export default function EditorPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setWatermarkImageFile(file);
+    // The original file stays the preview and the label; the PDF gets a JPEG
+    // plus, for images with transparency, a soft mask built from the alpha.
+    // All of it is set together once ready, so "Loaded" means "can apply".
 
     const reader = new FileReader();
     reader.onload = async (ev) => {
@@ -4853,15 +4870,32 @@ export default function EditorPage() {
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0);
 
+          // Transparency (a logo on a clear background) becomes a soft mask,
+          // so the white the JPEG is flattened onto doesn't cover the page.
+          const alphaCanvas = document.createElement('canvas');
+          alphaCanvas.width = canvas.width;
+          alphaCanvas.height = canvas.height;
+          const actx = alphaCanvas.getContext('2d');
+          let alpha: { widthPx: number; heightPx: number; data: Uint8Array; samples: Uint8Array } | null = null;
+          if (actx) {
+            actx.drawImage(img, 0, 0);
+            const rgba = actx.getImageData(0, 0, canvas.width, canvas.height).data;
+            const samples = new Uint8Array(canvas.width * canvas.height);
+            let translucent = false;
+            for (let i = 0; i < samples.length; i++) {
+              samples[i] = rgba[i * 4 + 3];
+              if (samples[i] < 255) translucent = true;
+            }
+            if (translucent) alpha = { widthPx: canvas.width, heightPx: canvas.height, data: pako.deflate(samples), samples };
+          }
+
           canvas.toBlob(blob => {
             if (blob) {
               blob.arrayBuffer().then(buf => {
                 setWatermarkImageBytes(new Uint8Array(buf));
                 setWatermarkImageDims({ width: img.naturalWidth, height: img.naturalHeight });
-
-                // Override the file to be considered JPEG
-                const jpegFile = new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
-                setWatermarkImageFile(jpegFile);
+                setWatermarkImageAlpha(alpha);
+                setWatermarkImageFile(file);
               });
             }
           }, 'image/jpeg', 0.9);
@@ -4877,6 +4911,7 @@ export default function EditorPage() {
     setWatermarkImageFile(null);
     setWatermarkImageBytes(null);
     setWatermarkImageDims(null);
+    setWatermarkImageAlpha(null);
   }, []);
 
   const handleApplyWatermark = useCallback(() => {
@@ -4930,6 +4965,10 @@ export default function EditorPage() {
           position: watermarkPosition,
           pageIndices
         };
+        // Text the standard fonts can't encode (Hindi, CJK…) is shaped by the browser.
+        if (!engineRef.current.isWinAnsiEncodable(watermarkText)) {
+          wm.raster = rasterizeTextLine(watermarkText, wm.fontSize, wm.color) ?? undefined;
+        }
       } else if (watermarkType === 'shape') {
         const r = parseInt(watermarkColor.slice(1, 3), 16) / 255;
         const g = parseInt(watermarkColor.slice(3, 5), 16) / 255;
@@ -4969,19 +5008,22 @@ export default function EditorPage() {
           position: watermarkPosition,
           pageIndices
         };
+        if (watermarkText && !engineRef.current.isWinAnsiEncodable(watermarkText)) {
+          wm.raster = rasterizeTextLine(watermarkText, fontSizePt, [r, g, b]) ?? undefined;
+        }
       } else {
         if (!watermarkImageBytes || !watermarkImageDims || !watermarkImageFile) {
           setError('Please upload an image first');
           return;
         }
 
-        const mimeType = watermarkImageFile.type === 'image/png' ? 'image/png' : 'image/jpeg';
-
         wm = {
           id: `wm-${Date.now()}`,
           type: 'image',
+          // The upload handler always re-encodes the image as JPEG.
           imageBytes: watermarkImageBytes,
-          mimeType,
+          mimeType: 'image/jpeg',
+          softMask: watermarkImageAlpha ?? undefined,
           width: watermarkImageDims.width * (fittedSize / 100),
           height: watermarkImageDims.height * (fittedSize / 100),
           opacity: watermarkOpacity / 100,
@@ -5018,7 +5060,7 @@ export default function EditorPage() {
       console.error('[Editor] Apply watermark failed:', e);
       setError(actionErrorMessage('Couldn\'t apply the watermark', e));
     }
-  }, [doc, watermarkType, watermarkText, watermarkFontName, watermarkOpacity, watermarkRotation, watermarkSize, watermarkPosition, watermarkMosaic, watermarkPageFrom, watermarkPageTo, watermarkLayer, watermarkColor, watermarkShapeColor, watermarkShapeType, watermarkImageBytes, watermarkImageDims, watermarkImageFile, watermarkBlendMode]);
+  }, [doc, watermarkType, watermarkText, watermarkFontName, watermarkOpacity, watermarkRotation, watermarkSize, watermarkPosition, watermarkMosaic, watermarkPageFrom, watermarkPageTo, watermarkLayer, watermarkColor, watermarkShapeColor, watermarkShapeType, watermarkImageBytes, watermarkImageDims, watermarkImageFile, watermarkImageAlpha, watermarkBlendMode]);
 
   // ── Signature handlers ──
   const resolveSignatureImage = useCallback((sig: VisualSignature): string | null => {
@@ -5154,6 +5196,16 @@ export default function EditorPage() {
     return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   }, [doc, currentPage, isDirty, createExportDocWithOverlays]);
 
+  // Asks before a download rewrites a signed PDF (compression, or edits after signing).
+  const [signedCompressOpen, setSignedCompressOpen] = useState(false);
+  const [signedDialogReason, setSignedDialogReason] = useState<'compress' | 'edit'>('compress');
+  const signedCompressResolveRef = useRef<((choice: SignedCompressChoice) => void) | null>(null);
+  const chooseSignedCompress = useCallback((choice: SignedCompressChoice) => {
+    setSignedCompressOpen(false);
+    signedCompressResolveRef.current?.(choice);
+    signedCompressResolveRef.current = null;
+  }, []);
+
   // ── Download / Save ──
   const handleDownload = useCallback(async () => {
     if (!doc || !engineRef.current) return;
@@ -5171,8 +5223,21 @@ export default function EditorPage() {
         !!raw && raw.byteLength > 5 &&
         (signedPristineRef.current || (!isDirty && signaturesRef.current.length === 0));
       let bytes: Uint8Array;
-      if (untouched) {
-        bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      // Rewriting a digitally signed file breaks its signature: ask first.
+      let keepSignedFile = false;
+      if (!untouched && hasDigitalSignature(raw)) {
+        setIsSaving(false);
+        const choice = await new Promise<SignedCompressChoice>((resolve) => {
+          signedCompressResolveRef.current = resolve;
+          setSignedDialogReason('edit');
+          setSignedCompressOpen(true);
+        });
+        if (choice === 'cancel') return;
+        keepSignedFile = choice === 'signed';
+        setIsSaving(true);
+      }
+      if (untouched || keepSignedFile) {
+        bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw!);
       } else {
         const exportDoc = await createExportDocWithOverlays(
           doc,
@@ -5190,9 +5255,12 @@ export default function EditorPage() {
       a.download = fileName || 'edited.pdf';
       a.click();
       URL.revokeObjectURL(url);
-      const keepSigned = signedPristineRef.current;
-      setIsDirty(false);
-      signedPristineRef.current = keepSigned;
+      // The edits were not in the signed copy, so they still need saving.
+      if (!keepSignedFile) {
+        const keepSigned = signedPristineRef.current;
+        setIsDirty(false);
+        signedPristineRef.current = keepSigned;
+      }
     } catch (e) {
       console.error('[Editor] Download failed:', e);
       setError(actionErrorMessage('Couldn\'t prepare the download', e));
@@ -5202,13 +5270,6 @@ export default function EditorPage() {
   }, [doc, currentPage, fileName, saveMode, isDirty, setIsDirty, createExportDocWithOverlays]);
 
   // ── Compressed Download ──
-  const [signedCompressOpen, setSignedCompressOpen] = useState(false);
-  const signedCompressResolveRef = useRef<((choice: SignedCompressChoice) => void) | null>(null);
-  const chooseSignedCompress = useCallback((choice: SignedCompressChoice) => {
-    setSignedCompressOpen(false);
-    signedCompressResolveRef.current?.(choice);
-    signedCompressResolveRef.current = null;
-  }, []);
 
   const handleCompressedDownload = useCallback(async (opts: {
     quality: number;
@@ -5219,6 +5280,7 @@ export default function EditorPage() {
     if (hasDigitalSignature(doc.rawBytes)) {
       const choice = await new Promise<SignedCompressChoice>((resolve) => {
         signedCompressResolveRef.current = resolve;
+        setSignedDialogReason('compress');
         setSignedCompressOpen(true);
       });
       if (choice === 'cancel') return;
@@ -7318,7 +7380,7 @@ export default function EditorPage() {
 
       {/* ── Export Panel ── */}
       <ConfirmDialogHost />
-      <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} />
+      <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} reason={signedDialogReason} />
       <ExportPanel
         isOpen={showExportPanel}
         onClose={() => setShowExportPanel(false)}

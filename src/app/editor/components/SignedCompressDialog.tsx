@@ -8,10 +8,18 @@ export type SignedCompressChoice = 'compress' | 'signed' | 'cancel';
 interface SignedCompressDialogProps {
   open: boolean;
   onChoose: (choice: SignedCompressChoice) => void;
+  /** Why the file would be rewritten: compression (default) or edits made after signing. */
+  reason?: 'compress' | 'edit';
 }
 
-/** Asks before a compressed download rewrites (and so unsigns) a signed PDF (BE-503). */
-export function SignedCompressDialog({ open, onChoose }: SignedCompressDialogProps) {
+/**
+ * Asks before a download rewrites — and so invalidates — a digitally signed
+ * PDF: a compressed download (BE-503), or one that carries edits made after
+ * signing. 'compress' means "go ahead and rewrite"; 'signed' means "give me
+ * the signed file as it is".
+ */
+export function SignedCompressDialog({ open, onChoose, reason = 'compress' }: SignedCompressDialogProps) {
+  const edit = reason === 'edit';
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onChoose('cancel'); }}>
       <Dialog.Portal>
@@ -25,8 +33,9 @@ export function SignedCompressDialog({ open, onChoose }: SignedCompressDialogPro
             This PDF is digitally signed
           </Dialog.Title>
           <Dialog.Description className="text-[13px] leading-relaxed text-muted-foreground">
-            Compressing rewrites the file, which removes the digital signature. To keep the signature valid,
-            download the signed file without compression.
+            {edit
+              ? 'You changed the document after it was signed. Downloading your changes rewrites the file, so the digital signature will no longer be valid. To keep it valid, download the signed file without your changes.'
+              : 'Compressing rewrites the file, which removes the digital signature. To keep the signature valid, download the signed file without compression.'}
           </Dialog.Description>
           <div className="flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
             <button
@@ -34,7 +43,7 @@ export function SignedCompressDialog({ open, onChoose }: SignedCompressDialogPro
               onClick={() => onChoose('compress')}
               className="rounded-lg border border-border bg-panel-elevated px-3 py-2 text-xs font-semibold text-foreground hover:border-red-500/60"
             >
-              Compress and remove signature
+              {edit ? 'Download changes (signature becomes invalid)' : 'Compress and remove signature'}
             </button>
             <button
               type="button"
