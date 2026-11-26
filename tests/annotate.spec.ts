@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { annotCount, downloadPdf, openInEditor, pdfPoint, pickTool, trackErrors } from "./helpers";
+import { annotCount, downloadPdf, fx, openInEditor, pdfDoc, pdfPoint, pickTool, trackErrors } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   page.on("dialog", (d) => d.accept());
@@ -62,6 +62,36 @@ test("freehand highlight stroke becomes a translucent ink annotation", async ({ 
   await drag(page, [60, 700], [400, 700], 20);
   const { bytes } = await downloadPdf(page);
   expect(await annotCount(bytes, "Ink")).toBe(1);
+});
+
+test("shapes on a /Rotate 90 page land where they were drawn", async ({ page }) => {
+  await openInEditor(page, fx("mixed-sizes-rotated.pdf"));
+  // Page 6 is an A5 portrait MediaBox (419.5 × 595) shown landscape by /Rotate 90.
+  for (let i = 1; i < 6; i++) await page.getByRole("button", { name: "Next page" }).click();
+  await expect(page.getByTestId("page-indicator")).toHaveText("6 / 7");
+  await pickTool(page, "draw");
+  await page.getByTitle("Rectangle", { exact: true }).click();
+  const box = (await page.getByTestId("page-canvas").boundingBox())!;
+  expect(box.width).toBeGreaterThan(box.height);
+  // A rectangle in the top-left quarter of the page as displayed…
+  await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.1);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.4, box.y + box.height * 0.3, { steps: 10 });
+  await page.mouse.up();
+  const { bytes } = await downloadPdf(page);
+
+  const { PDFName, PDFArray, PDFDict } = await import("pdf-lib");
+  const pdf = await pdfDoc(bytes);
+  const annots = pdf.getPage(5).node.lookup(PDFName.of("Annots"), PDFArray);
+  const square = annots.lookup(annots.size() - 1, PDFDict);
+  expect(square.get(PDFName.of("Subtype"))?.toString()).toBe("/Square");
+  const [x0, y0, x1, y1] = square.lookup(PDFName.of("Rect"), PDFArray).asArray().map((n) => Number(n.toString()));
+  // …is, in the unrotated MediaBox, near the origin: x spans the displayed
+  // top edge (10–30 % of 419.5) and y the displayed left edge (10–40 % of 595).
+  expect(x0).toBeGreaterThan(419.5 * 0.05);
+  expect(x1).toBeLessThan(419.5 * 0.35);
+  expect(y0).toBeGreaterThan(595 * 0.05);
+  expect(y1).toBeLessThan(595 * 0.45);
 });
 
 test("tool shortcuts switch tools", async ({ page }) => {
