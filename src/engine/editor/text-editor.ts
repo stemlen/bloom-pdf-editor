@@ -320,9 +320,10 @@ export function applyRunPositionShifts(
   };
 
   const injectLocalTd = (textIndex: number, dx: number, dy: number) => {
+    const [tdx, tdy] = toOperandSpace(dx, dy, textSpaceLinearAt(instructions, textIndex));
     instructions.splice(textIndex, 0, {
       operator: 'Td',
-      operands: [new PDFNumber(dx), new PDFNumber(dy)],
+      operands: [new PDFNumber(tdx), new PDFNumber(tdy)],
       offset: 0,
     });
     bumpIndicesFrom(textIndex, 1);
@@ -395,9 +396,14 @@ export function applyRunPositionShifts(
     }
 
     const inst = instructions[pos.index];
+    // Shifts are in page space; operands are in the space of the CTM (Tm, and
+    // the CTM before a cm) or of the text matrix (Td). Chrome/Skia pages run
+    // under a scaled, y-flipped CTM, where raw deltas moved trailing text too
+    // little (and the wrong way vertically), leaving it under grown text.
     if ((pos.kind === 'Tm' || pos.kind === 'cm') && inst.operands.length >= 6) {
-      inst.operands[4] = new PDFNumber(numVal(inst.operands[4]) + remainDx);
-      inst.operands[5] = new PDFNumber(numVal(inst.operands[5]) + remainDy);
+      const [ox, oy] = toOperandSpace(remainDx, remainDy, ctmLinearAt(instructions, pos.index));
+      inst.operands[4] = new PDFNumber(numVal(inst.operands[4]) + ox);
+      inst.operands[5] = new PDFNumber(numVal(inst.operands[5]) + oy);
       appliedToOp.set(pos.index, {
         dx: already.dx + remainDx,
         dy: already.dy + remainDy,
@@ -414,8 +420,9 @@ export function applyRunPositionShifts(
         continue;
       }
       if (inst.operands.length >= 2) {
-        inst.operands[0] = new PDFNumber(numVal(inst.operands[0]) + needDx);
-        inst.operands[1] = new PDFNumber(numVal(inst.operands[1]) + needDy);
+        const [ox, oy] = toOperandSpace(needDx, needDy, textSpaceLinearAt(instructions, pos.index));
+        inst.operands[0] = new PDFNumber(numVal(inst.operands[0]) + ox);
+        inst.operands[1] = new PDFNumber(numVal(inst.operands[1]) + oy);
       }
       if (bt >= 0) {
         localTdByBt.set(bt, { dx: prevLocal.dx + needDx, dy: prevLocal.dy + needDy });
@@ -437,6 +444,52 @@ export function applyRunPositionShifts(
   }
 
   return compileInstructions(instructions);
+}
+
+type Linear = [number, number, number, number];
+const IDENTITY_LINEAR: Linear = [1, 0, 0, 1];
+const mulLinear = (m: Linear, n: Linear): Linear => [
+  m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3],
+  m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3],
+];
+
+/** Linear part of the CTM in effect just before instruction `index`. */
+function ctmLinearAt(instructions: CSInstruction[], index: number): Linear {
+  let m = IDENTITY_LINEAR;
+  const stack: Linear[] = [];
+  for (let i = 0; i < index && i < instructions.length; i++) {
+    const { operator, operands } = instructions[i];
+    if (operator === 'q') stack.push(m);
+    else if (operator === 'Q') m = stack.pop() ?? IDENTITY_LINEAR;
+    else if (operator === 'cm' && operands.length >= 6) {
+      m = mulLinear(operands.slice(0, 4).map(numVal) as Linear, m);
+    }
+  }
+  return m;
+}
+
+/**
+ * Linear map from text space (Td operands) to page space just before
+ * `index`: the last Tm in the text object (identity at BT) times the CTM.
+ */
+function textSpaceLinearAt(instructions: CSInstruction[], index: number): Linear {
+  let tm = IDENTITY_LINEAR;
+  for (let i = Math.min(index, instructions.length) - 1; i >= 0; i--) {
+    const { operator, operands } = instructions[i];
+    if (operator === 'BT') break;
+    if (operator === 'Tm' && operands.length >= 6) {
+      tm = operands.slice(0, 4).map(numVal) as Linear;
+      break;
+    }
+  }
+  return mulLinear(tm, ctmLinearAt(instructions, index));
+}
+
+/** Page-space delta → operand-space delta for a row-vector map `m` (page = v × m). */
+function toOperandSpace(dx: number, dy: number, m: Linear): [number, number] {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (Math.abs(det) < 1e-9) return [dx, dy];
+  return [(dx * m[3] - dy * m[2]) / det, (dy * m[0] - dx * m[1]) / det];
 }
 
 function findTextPositionInstruction(

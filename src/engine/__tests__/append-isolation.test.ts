@@ -8,6 +8,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 import {
+  applyLineTextEdit,
+  applyRunPositionShifts,
   duplicateLineBelow,
   getPageContentBytes,
   insertTableColumnRight,
@@ -101,5 +103,35 @@ describe('appending to a Chrome-printed page (flipped, scaled CTM)', () => {
     const want = lines.map(l => visualFontSize(l.runs[0])).sort((a, b) => a - b);
     expect(sizes[0]).toBeCloseTo(want[0], 0);
     expect(sizes[1]).toBeCloseTo(want[1], 0);
+  });
+});
+
+describe('moving runs on a Chrome-printed page (shifts are in page space)', () => {
+  const runs = (doc: PDFDocumentData, bytes: Uint8Array) =>
+    interpretPage(bytes, doc.pages[0], doc.objects).textRuns;
+
+  it('a relative Td under a scaled, flipped CTM moves the run by exactly dx / dy', async () => {
+    const { doc, bytes } = await chrome();
+    const line = linesOf(doc, bytes).find(l => l.text.startsWith('Accents'))!;
+    const dash = line.segments.find(s => s.text === '—')!.run; // positioned by "4.16 0 Td"
+    const next = applyRunPositionShifts(bytes, [{ run: dash, dx: 20, dy: -6 }]);
+    const moved = runs(doc, next).find(r => r.text === '—' && Math.abs(r.y - (dash.y - 6)) < 0.5);
+    expect(moved).toBeDefined();
+    expect(moved!.x - dash.x).toBeCloseTo(20, 1);
+  });
+
+  it('typing mid-line pushes the rest of the line right by the full growth', async () => {
+    const { doc, bytes } = await chrome();
+    const page = doc.pages[0];
+    const flow = buildDocumentFlow(interpretPage(bytes, page, doc.objects).textRuns);
+    const line = flow.lines.find(l => l.text.startsWith('Accents'))!;
+    const dashBefore = line.segments.find(s => s.text === '—')!.run.x;
+    const caret = 'Accents: café'.length;
+    const newText = `${line.text.slice(0, caret)} XYZW${line.text.slice(caret)}`;
+    const res = applyLineTextEdit(bytes, page, doc.objects, line, newText, flow, { oldText: line.text, caretAfter: caret + 5 });
+    const dash = runs(doc, res.newContentBytes).find(r => r.text === '—' && Math.abs(r.y - line.baseline) < 2)!;
+    // " XYZW" is ~38pt of 12pt Helvetica; under the 0.75 CTM the trailer
+    // used to move only three quarters of the budgeted growth (~20pt).
+    expect(dash.x - dashBefore).toBeGreaterThan(25);
   });
 });
