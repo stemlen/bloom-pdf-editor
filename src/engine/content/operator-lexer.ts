@@ -213,9 +213,10 @@ function parseCSArray(lexer: PDFLexer): PDFArray {
         if (token.value === '[') {
           items.push(parseCSArray(lexer));
         } else {
-          // Unexpected — push as number 0 to avoid losing position
+          // Unexpected keyword (e.g. a missing "]"): end the array here and
+          // leave the keyword for the caller, which reads it as an operator.
           lexer.position = savedPos;
-          break;
+          return new PDFArray(items);
         }
         break;
       default:

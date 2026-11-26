@@ -420,6 +420,13 @@ export class PDFLexer {
       this.pos++;
     }
 
+    // A stray delimiter with no token of its own (")", "{", "}"): consume it so
+    // callers always make progress on damaged data instead of looping forever.
+    if (word === '' && this.pos < this.length) {
+      word = String.fromCharCode(this.data[this.pos]);
+      this.pos++;
+    }
+
     if (word === 'true') return { type: TokenType.Boolean, value: true, offset };
     if (word === 'false') return { type: TokenType.Boolean, value: false, offset };
     if (word === 'null') return { type: TokenType.Null, value: null, offset };
