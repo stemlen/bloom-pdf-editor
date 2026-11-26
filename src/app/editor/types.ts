@@ -77,6 +77,18 @@ export interface FloatingText {
   fontSize: number;
   fontFamily: string;
   color: string;
+  bold?: boolean;
+  italic?: boolean;
+  underline?: boolean;
+  strikethrough?: boolean;
+  /** Highlight colour (#rrggbb) behind the text, or null for none. */
+  highlight?: string | null;
+  align?: 'left' | 'center' | 'right' | 'justify';
+  /** Line height as a multiple of the font size. */
+  lineHeight?: number;
+  /** Extra space after each character, in points. */
+  letterSpacing?: number;
+  list?: 'none' | 'bullet' | 'numbered';
 }
 
 export interface FloatingImage {
