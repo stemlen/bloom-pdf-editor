@@ -1,6 +1,5 @@
 import {
   IDENTITY_MATRIX,
-  multiplyMatrix,
   transformPoint,
   type BoundingBox,
   type Matrix2D,
@@ -102,13 +101,16 @@ export class CoordinateNormalizer implements ICoordinateNormalizer {
 
 function buildRotationMatrix(rotation: number, w: number, h: number): Matrix2D {
   switch (rotation) {
+    // /Rotate turns the page clockwise for display (PDF 7.7.3.3). In the
+    // displayed page (still bottom-left origin):
     case 90:
-      // (x,y) → (y, w-x) roughly for bottom-left origin after 90° CW content
-      return multiplyMatrix([0, 1, -1, 0, h, 0], IDENTITY_MATRIX);
+      // (x, y) → (y, w − x): text drawn bottom-to-top reads left-to-right.
+      return [0, -1, 1, 0, 0, w];
     case 180:
-      return [ -1, 0, 0, -1, w, h ];
+      return [-1, 0, 0, -1, w, h];
     case 270:
-      return [ 0, -1, 1, 0, 0, w ];
+      // (x, y) → (h − y, x)
+      return [0, 1, -1, 0, h, 0];
     default:
       return IDENTITY_MATRIX;
   }

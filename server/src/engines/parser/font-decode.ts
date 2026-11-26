@@ -78,6 +78,23 @@ export function latin1ToBytes(text: string): Uint8Array {
   return out;
 }
 
+/**
+ * Decode a PDF text string (PDF 7.9.2.2) held as latin1 bytes: UTF-16BE with a
+ * BOM, UTF-8 with a BOM (PDF 2.0), otherwise PDFDocEncoding (kept as Latin-1).
+ */
+export function decodePdfTextString(raw: string): string {
+  const bytes = latin1ToBytes(raw);
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    let out = '';
+    for (let i = 2; i + 1 < bytes.length; i += 2) out += String.fromCharCode((bytes[i]! << 8) | bytes[i + 1]!);
+    return out;
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  }
+  return raw;
+}
+
 export async function loadPageFonts(
   resources: PdfDict | null,
   objects: Map<string, PdfPrimitive>,
@@ -299,6 +316,7 @@ function resolveDict(
 
 export interface DecodedGlyph {
   charCode: number;
+  /** '' for a painted glyph that has no Unicode mapping. */
   unicode: string;
   width1000: number;
 }
@@ -328,11 +346,11 @@ export function decodeTextString(raw: string, font: LoadedFont | undefined): Dec
       idx += 1;
     }
 
-    const unicode = mapCharToUnicode(charCode, font, isComposite);
-    // Skip null/control from broken Identity-H half-bytes (except tab/newline)
-    if (!unicode || (unicode.length === 1 && unicode.charCodeAt(0) === 0)) {
-      continue;
-    }
+    let unicode = mapCharToUnicode(charCode, font, isComposite);
+    // A glyph without a Unicode mapping (e.g. a shaped Devanagari half-form, or
+    // a NUL from a broken Identity-H map) contributes no text, but it is still
+    // painted: keep it so the pen advances and ActualText spans see its box.
+    if (unicode.length === 1 && unicode.charCodeAt(0) === 0) unicode = '';
 
     const widthKey =
       isComposite && font?.toCID.has(charCode) ? font.toCID.get(charCode)! : charCode;
@@ -365,6 +383,10 @@ function mapCharToUnicode(
 
   const fromTu = font.toUnicode.get(charCode);
   if (fromTu) return fromTu;
+  // The font maps its text through ToUnicode and this code isn't in it (e.g. a
+  // shaped Devanagari half-form, whose text sits in an /ActualText span):
+  // guessing from the code bytes would only produce Latin-1 garbage.
+  if (font.toUnicode.size > 0 && (isComposite || diffName)) return '';
 
   if (!isComposite) {
     if (

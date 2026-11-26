@@ -52,4 +52,14 @@ endcmap end end
     const glyphs = decodeTextString(raw, f);
     expect(glyphs[0]?.unicode).toBe('\u2022');
   });
+
+  it('keeps painted glyphs that have no Unicode mapping, so the pen still advances', () => {
+    // A shaped Devanagari half-form has a glyph and a width but no ToUnicode entry.
+    const f = font({ toUnicode: new Map([[0x0001, 'क']]), widths: new Map([[2, 300], [1, 600]]) });
+    const glyphs = decodeTextString(String.fromCharCode(0, 2, 0, 1), f);
+    expect(glyphs.map((g) => [g.unicode, g.width1000])).toEqual([
+      ['', 300],
+      ['क', 600],
+    ]);
+  });
 });
