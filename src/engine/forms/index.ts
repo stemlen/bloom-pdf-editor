@@ -30,6 +30,13 @@ export {
   runCalculationOrder,
 } from './widget-appearances';
 
+export {
+  setComplexTextRasterizer,
+  isWinAnsiEncodable,
+  rasterLineImage,
+} from './text-appearance';
+export type { RasterTextLine, ComplexTextRasterizer } from './text-appearance';
+
 export type {
   AcroFormFieldType,
   ButtonStyle,
