@@ -14,6 +14,22 @@ import { averageCharWidth, gapBetweenRuns, getRunBounds } from './metrics';
 const BULLET_CHARS = /^[\u2022\u2023\u25E6\u2043\u2219\u00B7\u25CF\u25CB•∙]$/;
 
 /**
+ * Gap before each run i+1 measured from the right edge of everything to its left
+ * (runs sorted by left edge), not just from run i. A zero-width run inside a
+ * word — e.g. a Devanagari matra or anusvara drawn from another font, as
+ * Chromium prints Hindi — would otherwise look like a column gutter.
+ */
+function coveredGaps(runs: TextRun[]): number[] {
+  const gaps: number[] = [];
+  let right = -Infinity;
+  for (let i = 0; i < runs.length - 1; i++) {
+    right = Math.max(right, getRunBounds(runs[i]).right);
+    gaps.push(Math.min(gapBetweenRuns(runs[i], runs[i + 1]), getRunBounds(runs[i + 1]).left - right));
+  }
+  return gaps;
+}
+
+/**
  * Detect a tab-style gap splitting left content from right-aligned content.
  * Returns the index of the last run in the left column, or -1 if none.
  */
@@ -23,9 +39,10 @@ export function detectTabSplitIndex(runs: TextRun[], fontSize: number): number {
   if (splits.length === 0) return -1;
   if (splits.length === 1) return splits[0];
 
+  const covered = coveredGaps(runs);
   const gaps: Array<{ index: number; size: number }> = [];
   for (let i = 0; i < runs.length - 1; i++) {
-    gaps.push({ index: i, size: gapBetweenRuns(runs[i], runs[i + 1]) });
+    gaps.push({ index: i, size: covered[i] });
   }
   gaps.sort((a, b) => b.size - a.size);
   const largest = gaps[0];
@@ -56,9 +73,10 @@ export function detectColumnSplitIndices(runs: TextRun[], fontSize: number): num
   const tightMin = Math.max(fontSize * 0.8, avgCharW * 1.6, 6);
   const isSpace = (ch: string | undefined) => ch === ' ' || ch === '\u00A0';
 
+  const covered = coveredGaps(runs);
   const splits: number[] = [];
   for (let i = 0; i < runs.length - 1; i++) {
-    const gap = gapBetweenRuns(runs[i], runs[i + 1]);
+    const gap = covered[i];
     if (gap >= columnMin) {
       splits.push(i);
       continue;
