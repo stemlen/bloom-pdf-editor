@@ -3,6 +3,7 @@ import { createId } from '../../utils/id.js';
 import { extractPageRaw } from './content-extractor.js';
 import { getPageContentBytes, parsePdfDocument, resolve } from './document-parser.js';
 import { ObjectGraph } from './object-graph.js';
+import { decodePdfTextString } from './font-decode.js';
 import { PdfDict, PdfRef, type PdfPrimitive } from './pdf-objects.js';
 import type { RawBookmark, RawDocument, RawDocumentMetadata } from './raw-model.js';
 
@@ -76,7 +77,8 @@ function extractMetadata(
   const str = (key: string): string | undefined => {
     const v = info.get(key);
     if (typeof v !== 'string') return undefined;
-    const t = v.trim();
+    // Info strings are PDF text strings: UTF-16BE (with BOM) for non-Latin text.
+    const t = decodePdfTextString(v).trim();
     return t === '' || /^\((anonymous|unspecified|unknown|none)\)$/i.test(t) ? undefined : t;
   };
 
@@ -112,7 +114,8 @@ function extractBookmarks(
     const node = resolve(objects, ref);
     if (!(node instanceof PdfDict)) return [];
 
-    const title = typeof node.get('Title') === 'string' ? (node.get('Title') as string) : 'Untitled';
+    const raw = node.get('Title');
+    const title = typeof raw === 'string' ? decodePdfTextString(raw) : 'Untitled';
     const dest = node.get('Dest') ?? (node.getDict('A')?.get('D') ?? null);
     const pageIndex = resolveDestPageIndex(dest, objects, pageCount);
 

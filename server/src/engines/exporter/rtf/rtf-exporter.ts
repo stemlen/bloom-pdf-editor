@@ -72,10 +72,26 @@ export class RtfExporter {
   }
 }
 
-function escRtf(s: string): string {
-  return s
-    .replace(/\\/g, '\\\\')
-    .replace(/\{/g, '\\{')
-    .replace(/\}/g, '\\}')
-    .replace(/\n/g, '\\par ');
+/**
+ * RTF is 7-bit: anything outside ASCII must be a \\uN? escape (N = signed
+ * UTF-16 code unit, '?' the fallback for readers without Unicode). Raw UTF-8
+ * bytes are read as the ANSI code page and turn Hindi/accents into mojibake.
+ */
+export function escRtf(s: string): string {
+  let out = '';
+  for (const ch of s.replace(/\r\n?/g, '\n')) {
+    if (ch === '\\') out += '\\\\';
+    else if (ch === '{') out += '\\{';
+    else if (ch === '}') out += '\\}';
+    else if (ch === '\n') out += '\\par ';
+    else if (ch === '\t') out += '\\tab ';
+    else if (ch.charCodeAt(0) < 0x80) out += ch;
+    else {
+      for (let i = 0; i < ch.length; i++) {
+        const unit = ch.charCodeAt(i);
+        out += `\\u${unit > 0x7fff ? unit - 0x10000 : unit}?`;
+      }
+    }
+  }
+  return out;
 }

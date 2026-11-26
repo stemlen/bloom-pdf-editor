@@ -162,8 +162,10 @@ export function ExportPanel({
   const getPageIndices = useCallback((): number[] | null => {
     if (pageRange === 'all') return null;
     if (pageRange === 'current') return [currentPage];
-    const from = Math.max(0, customFrom - 1);
-    const to = Math.min(totalPages - 1, customTo - 1);
+    // A range typed backwards ("3 to 1") means the same pages; taken as-is it
+    // was empty, which exported an empty file or silently converted every page.
+    const from = Math.max(0, Math.min(customFrom, customTo) - 1);
+    const to = Math.min(totalPages - 1, Math.max(customFrom, customTo) - 1);
     return Array.from({ length: to - from + 1 }, (_, i) => from + i);
   }, [pageRange, currentPage, customFrom, customTo, totalPages]);
 
