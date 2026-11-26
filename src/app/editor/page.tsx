@@ -683,6 +683,33 @@ export default function EditorPage() {
     setIsDirty(true);
   }, [pushEditorHistory]);
 
+  /**
+   * Text-box counterpart of updateFloatingImages. Text boxes were never
+   * recorded, so Undo couldn't remove, move back or restore one, and undoing
+   * an unrelated edit restored an older snapshot that silently dropped boxes
+   * added since. Typing is recorded once, when the box loses focus.
+   */
+  const updateFloatingTexts = useCallback((
+    updater: (prev: FloatingText[]) => FloatingText[],
+    label?: string,
+  ) => {
+    const next = updater(floatingTextsRef.current);
+    floatingTextsRef.current = next;
+    setFloatingTexts(next);
+    if (label) {
+      pushEditorHistory(label, { floatingTexts: next });
+      setIsDirty(true);
+    }
+    return next;
+  }, [pushEditorHistory]);
+
+  const recordFloatingTexts = useCallback((label: string) => {
+    pushEditorHistory(label, { floatingTexts: floatingTextsRef.current });
+    setIsDirty(true);
+  }, [pushEditorHistory]);
+  /** Text of the focused text box when it gained focus (to record typing on blur). */
+  const floatingTextAtFocusRef = useRef<{ id: string; text: string } | null>(null);
+
   const [selectedDrawingPage, setSelectedDrawingPage] = useState(currentPage);
   if (selectedDrawingPage !== currentPage) {
     setSelectedDrawingPage(currentPage);
@@ -771,17 +798,16 @@ export default function EditorPage() {
   const patchActiveFloatingText = useCallback((patch: Partial<TextBoxStyle>): boolean => {
     const id = activeFloatingTextIdRef.current;
     if (!id) return false;
-    setFloatingTexts(prev => prev.map(p => {
+    updateFloatingTexts(prev => prev.map(p => {
       if (p.id !== id) return p;
       const next = { ...p, ...patch };
       // Keep the box's top edge fixed when the size changes.
       if (patch.fontSize != null && patch.fontSize !== p.fontSize) next.pdfY = p.pdfY + p.fontSize - patch.fontSize;
       return next;
-    }));
-    setIsDirty(true);
+    }), 'format-text-box');
     requestAnimationFrame(() => floatingTextAreaRefs.current.get(id)?.focus({ preventScroll: true }));
     return true;
-  }, []);
+  }, [updateFloatingTexts]);
 
   const queueOrApplyStyle = useCallback((patch: Partial<TextStyleUI>) => {
     if (patchActiveFloatingText(patch)) return;
@@ -3077,9 +3103,8 @@ export default function EditorPage() {
       setTextList('none');
 
       focusFloatingTextIdRef.current = newBox.id;
-      setFloatingTexts(prev => [...prev, newBox]);
+      updateFloatingTexts(prev => [...prev, newBox], 'add-text-box');
       setActiveFloatingTextId(newBox.id);
-      setIsDirty(true);
       setActiveTool('text');
 
     } else if (activeTool === 'highlight') {
@@ -3133,7 +3158,7 @@ export default function EditorPage() {
       setSelectedSignatureId(null);
       setSelectedPdfSigFieldId(null);
     }
-  }, [renderResult, doc, currentPage, scale, activeTool, editingLine, handleEditSubmit, beginEditSession, displayItems, textFontSize, textColor, textFontFamily, highlightColor, formFields, handleFormFieldSelect, linksHighlighted, linkPopoverMode, resolveLinkDisplay, pdfSignatureFields, placeLibrarySignatureIntoField, pushEditorHistory]);
+  }, [renderResult, doc, currentPage, scale, activeTool, editingLine, handleEditSubmit, beginEditSession, displayItems, textFontSize, textColor, textFontFamily, highlightColor, formFields, handleFormFieldSelect, linksHighlighted, linkPopoverMode, resolveLinkDisplay, pdfSignatureFields, placeLibrarySignatureIntoField, pushEditorHistory, updateFloatingTexts]);
 
   // Double-click in select mode → enter text edit
   const handleCanvasDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -4259,6 +4284,7 @@ export default function EditorPage() {
       startPdfX: box.pdfX,
       startPdfY: box.pdfY
     };
+    let moved = false;
 
     const handleMove = (me: PointerEvent) => {
       if (!dragInfo.current || !doc || !renderResult) return;
@@ -4269,7 +4295,8 @@ export default function EditorPage() {
 
       const { startPdfX, startPdfY } = dragInfo.current;
 
-      setFloatingTexts(prev => prev.map(p => p.id === id ? {
+      moved = true;
+      updateFloatingTexts(prev => prev.map(p => p.id === id ? {
         ...p,
         pdfX: startPdfX + pdfDx,
         pdfY: startPdfY + pdfDy,
@@ -4278,13 +4305,14 @@ export default function EditorPage() {
 
     const handleUp = () => {
       dragInfo.current = null;
+      if (moved) recordFloatingTexts('move-text-box');
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }, [floatingTexts, scale, doc, renderResult]);
+  }, [floatingTexts, scale, doc, renderResult, updateFloatingTexts, recordFloatingTexts]);
 
   const handleFloatingImagePointerDown = useCallback((e: React.PointerEvent, id: string) => {
     e.stopPropagation();
@@ -6618,10 +6646,13 @@ export default function EditorPage() {
                 >
                   {isActive && (
                     <button
+                      type="button"
+                      aria-label="Delete text box"
+                      title="Delete text box"
                       className="absolute -top-3 -right-3 bg-red-500 text-white rounded-full p-1 shadow hover:bg-red-600 transition-colors z-30"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setFloatingTexts(prev => prev.filter(p => p.id !== ft.id));
+                        updateFloatingTexts(prev => prev.filter(p => p.id !== ft.id), 'delete-text-box');
                         if (activeFloatingTextId === ft.id) setActiveFloatingTextId(null);
                       }}
                     >
@@ -6653,9 +6684,18 @@ export default function EditorPage() {
                       if (unsupported.length > unsupportedStandardFontChars(ft.text).length) {
                         setError(unsupportedCharsWarning(unsupported));
                       }
-                      setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text } : p));
+                      updateFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text } : p));
                     }}
-                    onFocus={() => setActiveFloatingTextId(ft.id)}
+                    onFocus={() => {
+                      floatingTextAtFocusRef.current = { id: ft.id, text: ft.text };
+                      setActiveFloatingTextId(ft.id);
+                    }}
+                    onBlur={() => {
+                      const atFocus = floatingTextAtFocusRef.current;
+                      floatingTextAtFocusRef.current = null;
+                      const now = floatingTextsRef.current.find(p => p.id === ft.id);
+                      if (atFocus?.id === ft.id && now && now.text !== atFocus.text) recordFloatingTexts('edit-text-box');
+                    }}
                     className="bg-transparent outline-none overflow-hidden block resize p-0 m-0 border-0"
                     style={{
                       fontFamily: textBoxCssFamily(st.fontFamily),
@@ -6685,7 +6725,7 @@ export default function EditorPage() {
                       const h = target.offsetHeight / scale;
                       const changed = Math.abs(w - (ft.pdfWidth ?? layout.width + st.fontSize)) > 0.5
                         || Math.abs(h - (ft.pdfHeight ?? layout.height)) > 0.5;
-                      if (changed) setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p));
+                      if (changed) updateFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p), 'resize-text-box');
                     }}
                   />
                   ) : (
