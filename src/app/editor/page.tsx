@@ -95,6 +95,11 @@ async function loadPdfToInsert(file: File): Promise<PDFDocumentData> {
   return loaded.doc;
 }
 
+/** A page's content stream objects. Edits store new stream objects, so identity tells if it changed. */
+function pageContentStreams(doc: PDFDocumentData, pageIndex: number): PDFObject[] {
+  return doc.pages[pageIndex].contentRefs.map((ref) => doc.objects.get(ref.toKey()) as PDFObject);
+}
+
 /** True if the run is underlined or a thin stroke path sits under it (certificate labels). */
 function runHasPathUnderline(run: TextRun, paths: PathItem[]): boolean {
   if (run.isUnderline) return true;
@@ -351,6 +356,8 @@ export default function EditorPage() {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [thumbnailKey, setThumbnailKey] = useState(0);
   const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
+  /** Per page, the content streams its thumbnail was drawn from (see pageContentStreams). */
+  const thumbnailSourcesRef = useRef<PDFObject[][]>([]);
 
   const [activeTool, setActiveTool] = useState<EditorTool>('text');
   /** Redaction marks placed on the current page and not applied yet. */
@@ -1242,16 +1249,21 @@ export default function EditorPage() {
       setIsGeneratingThumbnails(true);
       const engine = engineRef.current!;
       const thumbs: string[] = [];
+      const sources: PDFObject[][] = [];
 
       try {
         for (let i = 0; i < doc!.pages.length; i++) {
           if (cancelled) break;
+          sources.push(pageContentStreams(doc!, i));
           // Render at 15% scale for a quick thumbnail
           const res = await engine.renderPage(doc!, i, { scale: 0.15, renderText: true, renderPaths: true, renderImages: true });
           if (cancelled) break;
           thumbs.push(res.canvas.toDataURL('image/jpeg', 0.6));
         }
-        if (!cancelled) setThumbnails(thumbs);
+        if (!cancelled) {
+          thumbnailSourcesRef.current = sources;
+          setThumbnails(thumbs);
+        }
       } catch (e) {
         console.error('[Editor] Thumbnail generation failed:', e);
       } finally {
@@ -1267,6 +1279,37 @@ export default function EditorPage() {
       setIsGeneratingThumbnails(false);
     };
   }, [doc, thumbnailKey]);
+
+  // Content edits (text, Replace All, redaction…) swap a page's content stream but keep the
+  // same `doc` object, so the effect above doesn't rerun. Redraw just the thumbnails whose
+  // content changed, once edits settle.
+  useEffect(() => {
+    if (!doc || !engineRef.current || isGeneratingThumbnails) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const sources = thumbnailSourcesRef.current;
+      if (sources.length !== doc.pages.length) return;
+      const updated = new Map<number, { url: string; source: PDFObject[] }>();
+      for (let i = 0; i < doc.pages.length; i++) {
+        const now = pageContentStreams(doc, i);
+        if (now.length === sources[i].length && now.every((s, k) => s === sources[i][k])) continue;
+        try {
+          const res = await engineRef.current!.renderPage(doc, i, { scale: 0.15, renderText: true, renderPaths: true, renderImages: true });
+          if (cancelled) return;
+          updated.set(i, { url: res.canvas.toDataURL('image/jpeg', 0.6), source: now });
+        } catch (e) {
+          console.warn('[Editor] Thumbnail refresh failed:', e);
+        }
+      }
+      if (cancelled || updated.size === 0) return;
+      for (const [i, { source }] of updated) sources[i] = source;
+      setThumbnails((prev) => prev.map((t, i) => updated.get(i)?.url ?? t));
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [doc, renderKey, isGeneratingThumbnails]);
 
   // Reset edit state when doc or page changes. Both change from many places
   // (load, navigation, page operations), and the reset also clears refs

@@ -153,6 +153,22 @@ test("undo after deleting a page restores the right pages", async ({ page }) => 
   expect(errors).toEqual([]);
 });
 
+test("thumbnails follow text edits, and only the edited page is redrawn", async ({ page }) => {
+  await openInEditor(page);
+  const thumbs = page.getByTestId("page-thumb").locator("img");
+  await expect(thumbs).toHaveCount(3);
+  const srcs = () => thumbs.evaluateAll((els) => els.map((e) => (e as HTMLImageElement).src));
+  const before = await srcs();
+
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByPlaceholder("Search text in PDF…").fill("Quarterly Garden Report");
+  await page.getByPlaceholder("Replace with…").fill("WWWWWWWWWWWWWWWWWWWWWWWW");
+  await page.getByRole("button", { name: "Replace All" }).click();
+
+  await expect.poll(async () => (await srcs())[0]).not.toBe(before[0]);
+  expect((await srcs()).slice(1)).toEqual(before.slice(1));
+});
+
 test("close clears the document and returns home", async ({ page }) => {
   await openInEditor(page);
   await page.getByRole("button", { name: "Close file & return home" }).click();
