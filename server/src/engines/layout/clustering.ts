@@ -170,8 +170,10 @@ function clusterWords(characters: NormalizedChar[], pageIndex: number): Clustere
     const sameLine = Math.abs(ch.baseline - prev.baseline) <= Math.max(2, prev.fontSize * 0.25);
     const gap = ch.bbox.x - (prev.bbox.x + prev.bbox.width);
     const threshold = Math.max(prev.fontSize, ch.fontSize) * 0.35;
+    // Touching glyphs stay one word across a font switch: subsetting producers
+    // (e.g. Chrome's Type3 fonts) change fonts mid-word ("M" + "eeting").
     const fontOk =
-      prev.fontName === ch.fontName &&
+      (prev.fontName === ch.fontName || gap <= Math.max(prev.fontSize, ch.fontSize) * 0.1) &&
       Math.abs(prev.fontSize - ch.fontSize) < 0.75;
 
     if (sameLine && gap <= threshold && fontOk && ch.unicode !== ' ') {

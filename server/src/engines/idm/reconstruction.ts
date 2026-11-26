@@ -1,5 +1,6 @@
 import { createId } from '../../utils/id.js';
-import type { LayoutDocument, LayoutRegion } from '../layout/types.js';
+import { bboxFromPoints, transformPoint, type BoundingBox } from '../common/geometry.js';
+import type { LayoutDocument, LayoutRegion, NormalizedPage } from '../layout/types.js';
 import type { RawDocument, RawImage, RawPage } from '../parser/raw-model.js';
 import { candidatesForRegion, reconstructText } from './text-reconstructor.js';
 import {
@@ -134,7 +135,8 @@ function reconstructPage(input: {
   footnotes: IntermediateDocument['footnotes'];
   endnotes: IntermediateDocument['endnotes'];
 }): Page {
-  const { layoutPage, rawPage, sectionId, pageOrd, totalPages } = input;
+  const { layoutPage, sectionId, pageOrd, totalPages } = input;
+  const rawPage = inLayoutSpace(input.rawPage, layoutPage.normalized);
   const pageId = createId('page');
 
   const orderedRegions = layoutPage.readingOrder.order
@@ -155,17 +157,34 @@ function reconstructPage(input: {
   // paragraphs, table rows). One IDM block per layout block keeps each one's
   // position and style, so exporters can tell headings and table rows apart
   // instead of seeing one page-sized block (BE-507, BE-509).
+  const isTextBlock = (b: LayoutRegion['blocks'][number]) =>
+    b.kind === 'text_cluster' ||
+    b.kind === 'line' ||
+    b.kind === 'word' ||
+    (b.text != null && b.text.length > 0);
   const expanded = regions.flatMap((region): LayoutRegion[] => {
-    if (region.kind !== 'text_block' || region.blocks.some((b) => b.kind === 'image')) {
+    const hasImage = region.blocks.some((b) => b.kind === 'image');
+    // A picture and the text next to it can land in one region (e.g. a
+    // paragraph a few points under a figure). An image region becomes an image
+    // block only, so split them, top to bottom, instead of dropping the text.
+    if (hasImage && region.blocks.some(isTextBlock)) {
+      return region.blocks
+        .filter((b) => b.kind === 'image' || isTextBlock(b))
+        .sort((a, b) => b.bbox.y + b.bbox.height - (a.bbox.y + a.bbox.height))
+        .map((b) => ({
+          ...region,
+          id: `${region.id}_${b.id}`,
+          kind: b.kind === 'image' ? 'image' : region.kind === 'image' ? 'text_block' : region.kind,
+          bbox: b.bbox,
+          blocks: [b],
+          averageFont: b.style?.fontName ?? region.averageFont,
+          averageFontSize: b.style?.fontSize ?? region.averageFontSize,
+        }));
+    }
+    if (region.kind !== 'text_block' || hasImage) {
       return [region];
     }
-    const textBlocks = region.blocks.filter(
-      (b) =>
-        b.kind === 'text_cluster' ||
-        b.kind === 'line' ||
-        b.kind === 'word' ||
-        (b.text != null && b.text.length > 0),
-    );
+    const textBlocks = region.blocks.filter(isTextBlock);
     if (textBlocks.length < 2) return [region];
     return textBlocks.map((b) => ({
       ...region,
@@ -244,6 +263,33 @@ function reconstructPage(input: {
     headers,
     footers,
     pageBreakAfter: pageOrd < totalPages - 1,
+  };
+}
+
+/**
+ * Layout regions live in the displayed page (after /Rotate); raw characters in
+ * content space. Text is rebuilt by comparing positions along its lines, so
+ * characters that stand upright on the displayed page (drawn turned against
+ * /Rotate, as landscape pages are) are brought into layout space first —
+ * otherwise each glyph reads as its own line ("L a n d s c a p e"). Text that
+ * is sideways on screen keeps its content-space positions, where it is level.
+ */
+function inLayoutSpace(raw: RawPage | undefined, normalized: NormalizedPage | undefined): RawPage | undefined {
+  if (!raw || !normalized?.rotation) return raw;
+  const m = normalized.rawToNormalized;
+  const map = (b: BoundingBox) =>
+    bboxFromPoints([
+      transformPoint(m, b.x, b.y),
+      transformPoint(m, b.x + b.width, b.y + b.height),
+    ]);
+  const upright = (rotation: number) => {
+    const shown = (((rotation - normalized.rotation) % 360) + 360) % 360;
+    return shown < 1 || shown > 359;
+  };
+  return {
+    ...raw,
+    characters: raw.characters.map((c) => (upright(c.rotation) ? { ...c, bbox: map(c.bbox) } : c)),
+    images: raw.images.map((i) => ({ ...i, bbox: map(i.bbox) })),
   };
 }
 

@@ -610,13 +610,27 @@ export function expandAndClassifyBlock(
     // "Personal Achievements: First item text" → label + first list item
     const labeled = splitInlineLabelContent(slice.text);
     if (labeled) {
-      const labelSlice = {
+      // Each part keeps the bounds of the runs it came from, not the whole
+      // line's first/last run, so it sits where it is on the page.
+      const labelEnd = slice.text.indexOf(labeled.label) + labeled.label.length;
+      const labelRuns: Run[] = [];
+      const contentRuns: Run[] = [];
+      let offset = 0;
+      for (const r of slice.runs) {
+        if (offset < labelEnd) labelRuns.push(r);
+        if (offset + r.text.length > labelEnd && r.text.slice(Math.max(0, labelEnd - offset)).trim()) {
+          contentRuns.push(r);
+        }
+        offset += r.text.length;
+      }
+      const labelSlice: { text: string; runs: Run[] } = {
         text: labeled.label,
         runs: [
           {
             ...(slice.runs[0]!),
             id: createId('run'),
             text: labeled.label,
+            bbox: unionRunBounds(labelRuns) ?? slice.runs[0]!.bbox,
             wordIds: [] as string[],
             characterIds: [] as string[],
           },
@@ -624,13 +638,14 @@ export function expandAndClassifyBlock(
       };
       nodes.push(classifyOne(ctxFromLineSlices(ctx, [labelSlice], i)));
 
-      const contentSlice = {
+      const contentSlice: { text: string; runs: Run[] } = {
         text: labeled.content,
         runs: [
           {
             ...(slice.runs[slice.runs.length - 1] ?? slice.runs[0]!),
             id: createId('run'),
             text: labeled.content,
+            bbox: unionRunBounds(contentRuns) ?? slice.runs[slice.runs.length - 1]?.bbox,
             wordIds: [] as string[],
             characterIds: [] as string[],
           },

@@ -69,6 +69,22 @@ export function reconstructText(input: {
   // only sort at the run level.
   const sorted = orderCharsRunAware(rawChars);
 
+  // Where the content stream itself painted a space glyph right after (or right
+  // before) a character, the text has a word break there — whatever the
+  // computed gap says (runs can overlap by a few points through glyph-width
+  // drift, which used to glue "Architected" + "backend" together).
+  const rawIndex = new Map((rawPage?.characters ?? []).map((c, i) => [c.id, i]));
+  const streamSpaceAfter = (c: RawCharacter) => {
+    const i = rawIndex.get(c.id);
+    const next = i === undefined ? undefined : rawPage!.characters[i + 1];
+    return !!next && /^\s$/.test(next.unicode) && Math.abs(next.bbox.y - c.bbox.y) <= c.fontSize * 0.35;
+  };
+  const streamSpaceBefore = (c: RawCharacter) => {
+    const i = rawIndex.get(c.id);
+    const before = i ? rawPage!.characters[i - 1] : undefined;
+    return !!before && /^\s$/.test(before.unicode) && Math.abs(before.bbox.y - c.bbox.y) <= c.fontSize * 0.35;
+  };
+
   // Layout clustering often omits space glyphs from sourceObjectIds — re-insert
   // spaces using the SAME break rules as layout clusterWords (gap / style / line),
   // which already joins words with ' '. Do NOT break merely because parentId
@@ -85,12 +101,17 @@ export function reconstructText(input: {
       // gap is typically ~0.25–0.35em. Use 0.2em so we recover those without
       // treating near-zero inter-letter kerning as word breaks.
       const threshold = fs * 0.2;
+      // A font change only marks a word break when the glyphs don't touch:
+      // subsetting producers (e.g. Chrome's Type3 fonts) switch fonts mid-word,
+      // which used to split "Meeting" into "M eeting".
       const fontOk =
-        prev.fontName === c.fontName &&
-        Math.abs(prev.fontSize - c.fontSize) < 0.75 &&
-        prev.fontWeight === c.fontWeight &&
-        prev.italic === c.italic;
+        gap <= fs * 0.1 ||
+        (prev.fontName === c.fontName &&
+          Math.abs(prev.fontSize - c.fontSize) < 0.75 &&
+          prev.fontWeight === c.fontWeight &&
+          prev.italic === c.italic);
       if (prev.unicode !== ' ' && c.unicode !== ' ' && prev.unicode !== '\n' && c.unicode !== '\n') {
+        const explicitSpace = streamSpaceAfter(prev) || streamSpaceBefore(c);
         if (!sameLine) {
           withSpaces.push({
             ...prev,
@@ -105,11 +126,12 @@ export function reconstructText(input: {
             glyphId: 10,
           });
         } else if (
-          (gap > threshold || !fontOk) &&
-          // Style/gap breaks before punctuation create "Excel ," / "risk ." artifacts
-          // (bold keywords often change fontWeight right before , or .)
-          !/^[,.;:!?\u2013\u2014)\]}%]/.test(c.unicode) &&
-          !/^[(\[{]/.test(prev.unicode)
+          explicitSpace ||
+          ((gap > threshold || !fontOk) &&
+            // Style/gap breaks before punctuation create "Excel ," / "risk ." artifacts
+            // (bold keywords often change fontWeight right before , or .)
+            !/^[,.;:!?\u2013\u2014)\]}%]/.test(c.unicode) &&
+            !/^[(\[{]/.test(prev.unicode))
         ) {
           withSpaces.push({
             ...prev,
