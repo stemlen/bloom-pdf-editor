@@ -7425,7 +7425,7 @@ export default function EditorPage() {
         <StatusBar
           renderResult={renderResult}
           activeTool={activeTool}
-          selectedRun={selectedLine?.runs[0] ?? null}
+          selectedText={selectedLine?.text ?? null}
           doc={doc}
           totalPages={totalPages}
         />
