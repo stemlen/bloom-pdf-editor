@@ -29,7 +29,11 @@ import {
 } from './utils';
 import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
-import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, unsupportedStandardFontChars, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+
+/** Warning for typed characters the PDF can't carry (written as '?'). */
+const unsupportedCharsWarning = (chars: string[]) =>
+  `Some characters you typed (${chars.slice(0, 6).join(' ')}${chars.length > 6 ? ' …' : ''}) aren't in this PDF's fonts, and fonts for scripts like Hindi can't be embedded yet, so they'll appear as "?" in the downloaded file.`;
 import { TextBoxPreview } from './components/TextBoxPreview';
 import { findMatchingFlowLine } from './flowLineMatch';
 import { getPdfBackend } from '@/workers/pdf/client';
@@ -1996,6 +2000,12 @@ export default function EditorPage() {
         if (engine.hasEmoji(commitText) && engine.countEmoji(commitText) > engine.countEmoji(originalText)) {
           setError('Emoji can\'t be embedded in this PDF\'s fonts, so they won\'t appear in the downloaded file.');
         }
+        // Same for other scripts the edited font lacks: the Helvetica fallback
+        // has no Devanagari etc., so the edit writes '?' — say so.
+        const unsupported = unsupportedStandardFontChars(
+          editResult.missingCharCodes.map(cp => String.fromCodePoint(cp)).join(''),
+        ).filter(ch => !engine.hasEmoji(ch));
+        if (unsupported.length > 0) setError(unsupportedCharsWarning(unsupported));
         if (editResult.needsFontAugmentation) {
           try {
             const missing = String.fromCharCode(
@@ -6636,7 +6646,14 @@ export default function EditorPage() {
                     value={ft.text}
                     spellCheck={false}
                     onChange={(e) => {
-                      setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text: e.target.value } : p));
+                      const text = e.target.value;
+                      // Text boxes use Standard 14 fonts (WinAnsi), which have
+                      // no glyphs for other scripts: warn when one is typed.
+                      const unsupported = unsupportedStandardFontChars(text);
+                      if (unsupported.length > unsupportedStandardFontChars(ft.text).length) {
+                        setError(unsupportedCharsWarning(unsupported));
+                      }
+                      setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text } : p));
                     }}
                     onFocus={() => setActiveFloatingTextId(ft.id)}
                     className="bg-transparent outline-none overflow-hidden block resize p-0 m-0 border-0"

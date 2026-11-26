@@ -79,6 +79,27 @@ test("add a text box", async ({ page }) => {
   expect(await pdfText(bytes)).toContain("Approved by the garden club");
 });
 
+test("typing Hindi the PDF's fonts can't carry warns instead of silently writing '?'", async ({ page }) => {
+  await openInEditor(page);
+  const toast = page.getByTestId("error-toast");
+
+  // Existing line (Helvetica): the edit falls back to Helvetica, which has no Devanagari.
+  await editLine(page, await pdfPoint(page, CONTACT.x, CONTACT.y), "Contact: नमस्ते");
+  await expect(toast).toContainText('appear as "?"');
+  await page.getByRole("button", { name: "Dismiss" }).click();
+
+  // New text box (Standard 14 / WinAnsi).
+  await page.getByRole("button", { name: "Add Text Box" }).click();
+  const at = await pdfPoint(page, 300, 120);
+  await page.mouse.click(at.x, at.y);
+  const box = page.getByTestId("text-box-input");
+  await expect(box).toBeFocused();
+  await box.fill("Approved");
+  await expect(toast).toHaveCount(0);
+  await box.fill("Approved — क्षत्रिय");
+  await expect(toast).toContainText('appear as "?"');
+});
+
 test("duplicate a line below", async ({ page }) => {
   await openInEditor(page);
   const at = await pdfPoint(page, CONTACT.x, CONTACT.y);

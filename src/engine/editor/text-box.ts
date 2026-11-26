@@ -122,6 +122,22 @@ export function encodeWinAnsi(text: string): string {
   return out;
 }
 
+/**
+ * Distinct characters of `text` that no Standard 14 font can show (Devanagari
+ * and other non-Latin scripts, emoji, …). Text boxes, and line edits that
+ * fall back to Helvetica, write these as '?'. Control characters (line
+ * breaks, unmapped-glyph NULs) are ignored.
+ */
+export function unsupportedStandardFontChars(text: string): string[] {
+  const out = new Set<string>();
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp < 0x20 || ch === '?') continue;
+    if (encodeWinAnsi(ch) === '?') out.add(ch);
+  }
+  return [...out];
+}
+
 /** Advance width of one WinAnsi byte in 1/1000 em. */
 function glyphWidth(face: string, code: number): number {
   const metrics = getStandardFont(face);
