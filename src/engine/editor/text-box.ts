@@ -12,6 +12,7 @@ import { PDFDict, PDFName, PDFString, type PDFObject, type PDFPageInfo, PDFRef }
 import { resolveRef } from '../parser/parser';
 import { getStandardFont } from '../fonts/standard14';
 import { serializeToString } from './stream-compiler';
+import { appendIsolatedContent } from '../content/append-isolation';
 
 export type TextBoxAlign = 'left' | 'center' | 'right' | 'justify';
 export type TextBoxList = 'none' | 'bullet' | 'numbered';
@@ -413,8 +414,7 @@ export function insertTextBox(
   const resource = ensureFaceResource(page, objects, layout.face);
   // Strings are written with octal escapes, so the operators are pure ASCII.
   const raw = new TextEncoder().encode(buildTextBoxOperators(layout, style, left, top, resource));
-  const merged = new Uint8Array(contentBytes.length + raw.length);
-  merged.set(contentBytes);
-  merged.set(raw, contentBytes.length);
-  return merged;
+  // The box is positioned in default user space, so it must not inherit a
+  // CTM or clip the page's own content leaves behind.
+  return appendIsolatedContent(contentBytes, raw);
 }

@@ -2801,7 +2801,7 @@ export default function EditorPage() {
       }
       const page = doc.pages[currentPage];
       const bytes = engineRef.current.getPageContentBytes(page, doc.objects);
-      const next = engineRef.current.insertTableColumnRight(bytes, rows);
+      const next = engineRef.current.insertTableColumnRight(bytes, rows, page, doc.objects);
       await engineRef.current.updatePageContent(page.contentRefs, next, doc.objects);
       pushEditorHistory('table-add-column');
       setIsDirty(true);
