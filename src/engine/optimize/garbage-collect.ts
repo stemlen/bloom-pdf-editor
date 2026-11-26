@@ -22,6 +22,7 @@ import type {
   StreamDuplicateGroup,
 } from './types';
 import { DEFAULT_OPTIMIZE_OPTIONS } from './types';
+import { serializeToString } from '../editor/stream-compiler';
 
 // ─── Object graph construction ───────────────────────────────────────────────
 
@@ -125,14 +126,31 @@ function streamBytes(obj: PDFObject): Uint8Array | null {
   return obj.getBytes();
 }
 
+/** Dictionary keys that describe only how the bytes are stored, not what the stream is. */
+const STORAGE_KEYS = new Set(['Length', 'Filter', 'DecodeParms', 'DL']);
+
 /**
- * Find streams with identical content hashes; pick lowest objNum as keeper.
+ * Two streams are interchangeable only if their dictionaries match too: the
+ * same content with a different /BBox, /Resources, /Width, /ColorSpace… draws
+ * differently. Storage keys are ignored, as the keeper is written with its own.
+ */
+function streamDictSignature(stream: PDFStream): string {
+  const parts: string[] = [];
+  for (const [k, v] of stream.dict.entries()) {
+    if (!STORAGE_KEYS.has(k)) parts.push(`${k}=${serializeToString(v)}`);
+  }
+  return parts.sort().join('\n');
+}
+
+/**
+ * Find streams with identical content and dictionaries; pick lowest objNum as keeper.
  */
 export function deduplicateStreams(
   objects: Map<string, PDFObject>,
   hashFn = DEFAULT_OPTIMIZE_OPTIONS.hashFn,
 ): DeduplicateResult {
   const byHash = new Map<string, string[]>();
+  const contentHash = new Map<string, string>();
   const refMap = new Map<string, string>();
   const groups: StreamDuplicateGroup[] = [];
   let totalBytesSaved = 0;
@@ -141,13 +159,16 @@ export function deduplicateStreams(
     const bytes = streamBytes(obj);
     if (!bytes || bytes.length === 0) continue;
     const hash = hashFn(bytes);
-    const list = byHash.get(hash) ?? [];
+    const groupKey = `${hash}\n${streamDictSignature(obj as PDFStream)}`;
+    contentHash.set(groupKey, hash);
+    const list = byHash.get(groupKey) ?? [];
     list.push(key);
-    byHash.set(hash, list);
+    byHash.set(groupKey, list);
   }
 
-  for (const [hash, keys] of byHash.entries()) {
+  for (const [groupKey, keys] of byHash.entries()) {
     if (keys.length < 2) continue;
+    const hash = contentHash.get(groupKey)!;
     keys.sort((a, b) => {
       const [ao] = a.split('_').map(Number);
       const [bo] = b.split('_').map(Number);

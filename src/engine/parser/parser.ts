@@ -14,7 +14,7 @@
  */
 
 import { PDFLexer, TokenType } from './lexer';
-import { buildFullXref, parseObject as parseObjectFromXref } from './xref';
+import { buildFullXref, parseObject as parseObjectFromXref, reconstructXref } from './xref';
 import { applyFilters } from './filters';
 import {
   PDFArray,
@@ -59,12 +59,39 @@ export async function parsePDF(
   data: Uint8Array,
   options: ParsePDFOptions = {},
 ): Promise<PDFDocumentData> {
+  let parsed: PDFDocumentData | null = null;
+  let failure: unknown = null;
+  try {
+    parsed = await parseWithXref(data, await buildFullXref(data), options);
+    if (parsed.pages.length > 0) return parsed;
+  } catch (e) {
+    failure = e;
+  }
+  // Damaged cross-reference data (bad startxref, corrupt table, shifted
+  // offsets): rebuild it by scanning the file for objects, as other readers do.
+  try {
+    const recovered = await parseWithXref(data, await reconstructXref(data), options, true);
+    if (recovered.pages.length > 0) {
+      console.warn('[PDF Parser] Cross-reference data was damaged; rebuilt it by scanning the file.', failure ?? '');
+      return recovered;
+    }
+  } catch {
+    // Not recoverable — report the original problem.
+  }
+  if (parsed) return parsed;
+  throw failure;
+}
+
+async function parseWithXref(
+  data: Uint8Array,
+  xref: XRefTable,
+  options: ParsePDFOptions,
+  recovering = false,
+): Promise<PDFDocumentData> {
   // 1. Read header
   const version = readHeader(data);
 
-  // 2. Build cross-reference table
-  const xref = await buildFullXref(data);
-
+  // 2. Cross-reference table: built by the caller
   const encrypted = xref.trailerDict.has('Encrypt');
   const deferFilters = options.deferEncryptedFilters !== false && encrypted;
 
@@ -75,6 +102,15 @@ export async function parsePDF(
   const resolve = (obj: PDFObject): PDFObject => resolveRef(obj, objects);
 
   // 5. Find catalog (root) dictionary
+  if (recovering && !(xref.trailerDict.getRef('Root') && resolve(xref.trailerDict.getRef('Root')!) instanceof PDFDict)) {
+    for (const [key, obj] of objects) {
+      if (obj instanceof PDFDict && obj.getName('Type') === 'Catalog') {
+        const [num, gen] = key.split('_').map(Number);
+        xref.trailerDict.set('Root', new PDFRef(num, gen));
+        break;
+      }
+    }
+  }
   const catalogRef = xref.trailerDict.getRef('Root');
   if (!catalogRef) throw new Error('Trailer missing /Root entry');
   const catalog = resolve(catalogRef);

@@ -28,6 +28,7 @@ import {
   type PDFDocumentData,
 } from '../types';
 import { serializeIndirectObject, concatBytes } from '../editor/stream-compiler';
+import { needsWriteEncryption } from '../security/encryption/write-encryption';
 import { findStartXref } from '../parser/xref';
 import { OffsetManager, type ObjectKey } from './offset-manager';
 import { RevisionManager, listRevisions } from './revision-manager';
@@ -79,6 +80,10 @@ export function appendIncrementalUpdate(
   const originalBytes = doc.rawBytes;
   if (!originalBytes || originalBytes.length === 0) {
     throw new Error('Incremental update requires doc.rawBytes (original PDF)');
+  }
+  // Appended objects would be written unencrypted and come out unreadable.
+  if (needsWriteEncryption(doc)) {
+    throw new Error("Password-protected PDFs can't be updated in place. Remove the password first, or save a full copy.");
   }
 
   const chunks: Uint8Array[] = [];

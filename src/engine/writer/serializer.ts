@@ -31,6 +31,7 @@ import {
 import { serializeIndirectObject } from '../editor/stream-compiler';
 import { concatBytes } from '../editor/stream-compiler';
 import { packIntoObjectStreams, buildXRefStream } from '../optimize/object-streams';
+import { encryptForWrite } from '../security/encryption/write-encryption';
 
 // ─── Full document serialization ────────────────────────────────────────────
 
@@ -39,6 +40,8 @@ import { packIntoObjectStreams, buildXRefStream } from '../optimize/object-strea
  * This writes every object — use for "Save As" or export operations.
  */
 export async function serializeDocument(doc: PDFDocumentData): Promise<Uint8Array> {
+  // Opened or newly protected documents hold plaintext objects plus their key.
+  doc = await encryptForWrite(doc);
   const chunks: Uint8Array[] = [];
   const offsets = new Map<string, number>(); // key → byte offset
 
@@ -114,8 +117,8 @@ export async function serializeDocument(doc: PDFDocumentData): Promise<Uint8Arra
  * Falls back to standard serialization on failure.
  */
 export async function serializeDocumentCompact(doc: PDFDocumentData): Promise<Uint8Array> {
-  // Strings and streams of an encrypted document are already ciphertext, and
-  // packing them into an unencrypted ObjStm would make the file unreadable.
+  // Objects of an encrypted document are encrypted one by one, and packing them
+  // into an ObjStm would encrypt them twice, so encrypted files stay uncompacted.
   if (doc.xref.trailerDict.has('Encrypt')) return serializeDocument(doc);
   try {
     return await _serializeCompact(doc);
