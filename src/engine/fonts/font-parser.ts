@@ -84,6 +84,8 @@ export interface FontData {
   charProcs?: Map<string, PDFStream> | null;
   /** Type 3 image XObjects named in the font's /Resources (colour emoji glyphs) */
   type3Images?: Map<string, PDFStream> | null;
+  /** CIDFontType2 /CIDToGIDMap stream (CID → glyph ID); absent or null means /Identity */
+  cidToGid?: Uint16Array | null;
 }
 
 // ─── Main font loading function ─────────────────────────────────────────────
@@ -499,6 +501,9 @@ function loadDescendantFont(
     if (resolved instanceof PDFStream) {
       // Binary map: each 2-byte entry maps CID index to glyph ID
       const mapData = resolved.getBytes();
+      const cidToGid = new Uint16Array(mapData.length >> 1);
+      for (let cid = 0; cid < cidToGid.length; cid++) cidToGid[cid] = (mapData[cid * 2] << 8) | mapData[cid * 2 + 1];
+      fontData.cidToGid = cidToGid;
       if (fontData.ttfFont && mapData.length >= 2) {
         for (let cid = 0; cid < mapData.length / 2; cid++) {
           const gid = (mapData[cid * 2] << 8) | mapData[cid * 2 + 1];

@@ -66,8 +66,19 @@ function distributeByCaret(
     suffix++;
   }
 
+  // Never cut a grapheme / Indic cluster: a matra, virama-joined consonant or
+  // ZWJ belongs with the character before it (कि → का changes the whole कि).
+  while (prefix > 0 && continuesCluster(oldText, prefix)) prefix--;
+  while (suffix > 0 && continuesCluster(oldText, oldText.length - suffix)) suffix--;
+
   const midNew = newText.slice(prefix, newText.length - suffix);
   const oldMidLen = oldText.length - prefix - suffix;
+
+  // A replaced range spanning several segments (a word drawn as many runs, as
+  // Chromium prints Hindi): rewrite only the segments it touches. Leaving it to
+  // the proportional split re-encodes — and corrupts — every untouched run.
+  const spanning = distributeSpanningChange(segs, prefix, oldText.length - suffix, midNew);
+  if (spanning) return spanning.map(e => e.newText).join('') === newText ? spanning : null;
 
   // Prefer the segment that contained the edit point.
   const delta = newText.length - oldText.length;
@@ -99,6 +110,48 @@ function distributeByCaret(
   }
 
   return edits.map(e => e.newText).join('') === newText ? edits : null;
+}
+
+/** True when the code unit at `i` must stay with the one before it. */
+function continuesCluster(text: string, i: number): boolean {
+  if (i <= 0 || i >= text.length) return false;
+  const cur = text[i];
+  const prev = text[i - 1];
+  return /\p{M}/u.test(cur) || cur === '\u200D' || prev === '\u200D' || prev === '\u094D' ||
+    // Low surrogate of a pair
+    (cur >= '\uDC00' && cur <= '\uDFFF');
+}
+
+/**
+ * Old range [start, end) covers more than one segment: the first touched
+ * segment keeps its head and takes the new text, the last keeps its tail,
+ * those in between are emptied, all others are left exactly as they were.
+ * Returns null when the range lies within one segment.
+ */
+function distributeSpanningChange(
+  segs: StyledSegment[],
+  start: number,
+  end: number,
+  midNew: string,
+): SegmentEdit[] | null {
+  if (end <= start) return null;
+  let first = -1;
+  let last = -1;
+  for (let i = 0; i < segs.length; i++) {
+    if (segs[i].endIndex > start && segs[i].startIndex < end) {
+      if (first < 0) first = i;
+      last = i;
+    }
+  }
+  if (first < 0 || first === last) return null;
+
+  return segs.map((seg, i) => {
+    if (i < first || i > last) return { run: seg.run, newText: seg.text };
+    let text = '';
+    if (i === first) text = seg.text.slice(0, start - seg.startIndex) + midNew;
+    if (i === last) text += seg.text.slice(end - seg.startIndex);
+    return { run: seg.run, newText: text };
+  });
 }
 
 function proportionalSplit(line: TextLine, newText: string): SegmentEdit[] {

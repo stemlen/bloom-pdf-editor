@@ -123,7 +123,32 @@ export function averageCharWidth(run: TextRun): number {
  * a trailing space still yield a letter-like average; pure space runs fall back
  * to averageCharWidth.
  */
+/**
+ * Width units a character takes in shaped (Indic) text: combining marks sit on
+ * their base (0) and a consonant after a virama joins it as a conjunct (½).
+ */
+function shapedUnits(text: string): number {
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (/\s/.test(ch) || /\p{M}/u.test(ch) || ch === '\u200D' || ch === '\u200C') continue;
+    n += text[i - 1] === '\u094D' ? 0.5 : 1;
+  }
+  return n;
+}
+
+const SHAPED_SCRIPT = /[\u0900-\u0DFF]/;
+
 export function averageLetterWidth(run: TextRun): number {
+  // Devanagari & co.: one glyph may carry a whole cluster (or nothing, after
+  // /ActualText) — average over shaped letters, not glyphs or code units.
+  if (SHAPED_SCRIPT.test(run.text)) {
+    const units = shapedUnits(run.text);
+    const inked = run.glyphs.filter(g => !/^\s$/.test(g.unicode));
+    if (units > 0 && inked.length > 0) {
+      return inked.reduce((w, g) => w + g.width, 0) / units;
+    }
+  }
   const glyphs = run.glyphs.filter(g => g.unicode && !/\s/.test(g.unicode));
   if (glyphs.length > 0) {
     let w = 0;
@@ -164,6 +189,10 @@ export function estimateTextWidth(text: string, run: TextRun): number {
   if (text.length === 0) return 0;
   const letterAvg = averageLetterWidth(run);
   const spaceW = estimateSpaceWidth(run);
+  if (SHAPED_SCRIPT.test(text)) {
+    const spaces = (text.match(/\s/g) ?? []).length;
+    return shapedUnits(text) * letterAvg + spaces * spaceW;
+  }
   let w = 0;
   for (let i = 0; i < text.length; i++) {
     w += /\s/.test(text[i]) ? spaceW : letterAvg;

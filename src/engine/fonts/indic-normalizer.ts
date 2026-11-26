@@ -150,6 +150,16 @@ export function isDevanagariVirama(ch: string): boolean {
 // ─── Pre-base Vowel & Dotted Circle Normalization ───────────────────────────
 
 /**
+ * True when the pre-base vowel at `units[i]` already follows its host in logical
+ * order: a consonant, or a consonant + nukta (बढ़िया = ब ढ ़ ि य ा).
+ */
+function hasPreBaseHost(units: string[], i: number): boolean {
+  let k = i - 1;
+  if (k >= 0 && units[k] === '\u093C') k--; // nukta sits between the consonant and the matra
+  return k >= 0 && isDevanagariConsonant(units[k]);
+}
+
+/**
  * Reorder pre-base vowel signs (e.g. Devanagari `ि` U+093F) from visual order
  * before a consonant/cluster to logical Unicode order after the consonant cluster.
  * Also cleans up dotted circles (◌) that render when marks were extracted in visual order.
@@ -179,8 +189,7 @@ export function reorderPreBaseVowels(text: string): string {
 
   while (i < chars.length) {
     const ch = chars[i];
-    const prevChar = i > 0 ? chars[i - 1] : '';
-    const isOrphaned = !prevChar || !isDevanagariConsonant(prevChar) || prevChar === ' ' || prevChar === '\u25CC';
+    const isOrphaned = !hasPreBaseHost(chars, i);
 
     if (isPreBaseVowel(ch) && isOrphaned) {
       // Find following consonant cluster
@@ -489,6 +498,10 @@ export interface IndicGlyphItem {
   fontSize: number;
   textSpaceWidth?: number;
   tRm: { a: number; b: number; c: number; d: number; e: number; f: number };
+  /** Text from an /ActualText span — authoritative and already in logical order. */
+  actualText?: boolean;
+  /** Original pen x when `tRm.e` was moved onto a pre-base vowel sign. */
+  originalE?: number;
 }
 
 export interface IndicRunItem {
@@ -516,12 +529,14 @@ export function reorderIndicGlyphs<T extends IndicGlyphItem>(glyphs: T[]): T[] {
       continue;
     }
 
-    const prevGlyph = i > 0 ? glyphs[i - 1] : null;
-    const isOrphaned =
-      !prevGlyph ||
-      !isDevanagariConsonant(prevGlyph.unicode) ||
-      prevGlyph.unicode === ' ' ||
-      prevGlyph.unicode === '\u25CC';
+    // /ActualText output is already logical; never move it or anything around it.
+    if (cur.actualText) {
+      result.push(cur);
+      i++;
+      continue;
+    }
+
+    const isOrphaned = !hasPreBaseHost(glyphs.map(g => g.unicode), i);
 
     if (isPreBaseVowel(cur.unicode) && isOrphaned) {
       // Find following consonant cluster
@@ -530,7 +545,7 @@ export function reorderIndicGlyphs<T extends IndicGlyphItem>(glyphs: T[]): T[] {
         j++;
       }
 
-      if (j < glyphs.length && isDevanagariConsonant(glyphs[j].unicode)) {
+      if (j < glyphs.length && !glyphs[j].actualText && isDevanagariConsonant(glyphs[j].unicode)) {
         let clusterEnd = j + 1;
         if (clusterEnd < glyphs.length && glyphs[clusterEnd].unicode === '\u093C') clusterEnd++; // Nukta
 
@@ -553,6 +568,7 @@ export function reorderIndicGlyphs<T extends IndicGlyphItem>(glyphs: T[]): T[] {
               ...glyphs[j],
               x: minClusterX,
               tRm: { ...glyphs[j].tRm, e: minClusterE },
+              originalE: glyphs[j].originalE ?? glyphs[j].tRm.e,
             });
           } else {
             result.push(glyphs[k]);

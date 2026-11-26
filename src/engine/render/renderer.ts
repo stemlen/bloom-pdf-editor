@@ -682,7 +682,11 @@ function drawTextRunAtPositions(
     const { family, weight, style } = getCanvasFontProperties(run.fontName, fontData);
     ctx.fillStyle = fillColor;
 
-    if (fontData?.charProcs) {
+    if (usesGlyphOutlines(fontData)) {
+      // Exact embedded glyphs at their own PDF positions — no substitute-font
+      // width mismatch for flow positions to compensate.
+      drawOutlineRun(ctx, run, fontData, family, weight, style, fillColor);
+    } else if (fontData?.charProcs) {
       // Type3 — must draw glyph-by-glyph
       for (let i = 0; i < positions.length; i++) {
         const glyph = positions[i].glyph;
@@ -832,6 +836,7 @@ function drawTextRunAtPositions(
 }
 
 import { drawType3Glyph, prepareType3Images, type3CharName } from './type3';
+import { drawOutlineGlyph, outlineGlyphId, usesGlyphOutlines } from './glyph-outlines';
 
 function drawTextRun(
   ctx: CanvasRenderingContext2D,
@@ -854,7 +859,9 @@ function drawTextRun(
 
     const isType3 = fontData?.charProcs && fontData.charProcs.size > 0;
 
-    if (isType3) {
+    if (usesGlyphOutlines(fontData)) {
+      drawOutlineRun(ctx, run, fontData, family, weight, style, fillColor);
+    } else if (isType3) {
       for (let i = 0; i < run.glyphs.length; i++) {
         const glyph = run.glyphs[i];
         const name = type3CharName(fontData!, glyph.charCode ?? glyph.unicode.charCodeAt(0));
@@ -873,6 +880,45 @@ function drawTextRun(
 
     ctx.restore();
   });
+}
+
+/**
+ * Draw a run from the embedded TrueType outlines, glyph by glyph at the PDF's
+ * own positions (complex-script CID fonts, see glyph-outlines.ts).
+ */
+function drawOutlineRun(
+  ctx: CanvasRenderingContext2D,
+  run: TextRun,
+  fontData: FontData & { ttfFont: NonNullable<FontData['ttfFont']> },
+  family: string,
+  weight: string,
+  style: string,
+  fillColor: string,
+): void {
+  let minX = Infinity;
+  let maxX = -Infinity;
+  for (const glyph of run.glyphs) {
+    // Indic repair may move a cluster's first glyph onto its pre-base matra;
+    // ink goes where the PDF put it.
+    const e = glyph.originalE ?? glyph.tRm.e;
+    const drawn = drawOutlineGlyph(ctx, fontData.ttfFont, outlineGlyphId(fontData, glyph.charCode), glyph.tRm, e, glyph.tRm.f);
+    if (!drawn && glyph.unicode.trim()) {
+      drawGlyph(ctx, glyph, run, family, weight, style, fillColor, e, glyph.tRm.f);
+    }
+    minX = Math.min(minX, e);
+    maxX = Math.max(maxX, e + glyph.width);
+  }
+
+  if (run.isUnderline && maxX > minX && run.glyphs.length > 0) {
+    const { tRm } = run.glyphs[0];
+    const fs = Math.sqrt(tRm.c * tRm.c + tRm.d * tRm.d) || run.fontSize || 12;
+    ctx.beginPath();
+    ctx.moveTo(minX, tRm.f - fs * 0.15);
+    ctx.lineTo(maxX, tRm.f - fs * 0.15);
+    ctx.lineWidth = Math.max(1, fs * 0.05);
+    ctx.strokeStyle = fillColor;
+    ctx.stroke();
+  }
 }
 
 /** Split chunks when TJ inserts a large gap (do not stretch fillText across it). */

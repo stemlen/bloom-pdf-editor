@@ -194,6 +194,41 @@ export interface GlyphPosition {
   textSpaceWidth: number;
   /** Text Rendering Matrix (T_rm) which exactly places and scales the glyph in User Space */
   tRm: { a: number; b: number; c: number; d: number; e: number; f: number };
+  /**
+   * True when `unicode` comes from a marked-content /ActualText span (PDF 14.9.4):
+   * the first glyph of the span carries the whole replacement text and the rest
+   * carry ''. Such text is already in logical order and must not be reordered.
+   */
+  actualText?: boolean;
+  /**
+   * Pen x (tRm.e) where the PDF draws this glyph, kept when Indic repair moves
+   * the glyph's logical position onto its pre-base vowel sign.
+   */
+  originalE?: number;
+}
+
+/** Open /ActualText span: the replacement text goes to the first glyph shown inside it. */
+interface ActualTextSpan {
+  text: string;
+  consumed: boolean;
+}
+
+/** Decode a PDF text string (UTF-16BE with BOM, UTF-8 with BOM, or PDFDocEncoding ≈ Latin-1). */
+function decodePdfTextString(obj: PDFObject | undefined): string | null {
+  let bytes: Uint8Array;
+  if (obj instanceof PDFString || obj instanceof PDFHexString) bytes = obj.toBytes();
+  else return null;
+  if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    let s = '';
+    for (let i = 2; i + 1 < bytes.length; i += 2) s += String.fromCharCode((bytes[i] << 8) | bytes[i + 1]);
+    return s;
+  }
+  if (bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return new TextDecoder('utf-8').decode(bytes.subarray(3));
+  }
+  let s = '';
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+  return s;
 }
 
 export interface PathSegment {
@@ -471,6 +506,14 @@ export function interpretPage(
   let pathStartX = 0;
   let pathStartY = 0;
 
+  // Marked-content nesting (BMC/BDC … EMC). Entries carry an /ActualText span or null.
+  const markedContent: (ActualTextSpan | null)[] = [];
+  /** Outermost open /ActualText span — it replaces everything shown inside it. */
+  const activeActualText = (): ActualTextSpan | undefined => {
+    for (const mc of markedContent) if (mc) return mc;
+    return undefined;
+  };
+
   // Pre-load fonts from resources
   loadFonts(page.resources, objects, fonts);
 
@@ -671,7 +714,7 @@ export function interpretPage(
         // Show a text string
         const strObj = ops[0];
         if (strObj) {
-          const result = showTextString(strObj, gs, textMatrix, fonts, objects, page, i);
+          const result = showTextString(strObj, gs, textMatrix, fonts, objects, page, i, activeActualText());
           if (result) {
             displayList.push(result.run);
             rawTextRuns.push(result.run);
@@ -735,7 +778,7 @@ export function interpretPage(
                 f: textMatrix.f + displacement * textMatrix.b,
               };
             } else {
-              const result = showTextString(item, gs, textMatrix, fonts, objects, page, i);
+              const result = showTextString(item, gs, textMatrix, fonts, objects, page, i, activeActualText());
               if (result) {
                 if (!firstRun) firstRun = result.run;
                 currentGlyphs.push(...result.run.glyphs);
@@ -756,7 +799,7 @@ export function interpretPage(
         textMatrix = { ...textLineMatrix };
         const strObj = ops[0];
         if (strObj) {
-          const result = showTextString(strObj, gs, textMatrix, fonts, objects, page, i);
+          const result = showTextString(strObj, gs, textMatrix, fonts, objects, page, i, activeActualText());
           if (result) {
             displayList.push(result.run);
             rawTextRuns.push(result.run);
@@ -775,7 +818,7 @@ export function interpretPage(
         textMatrix = { ...textLineMatrix };
         const strObj = ops[2];
         if (strObj) {
-          const result = showTextString(strObj, gs, textMatrix, fonts, objects, page, i);
+          const result = showTextString(strObj, gs, textMatrix, fonts, objects, page, i, activeActualText());
           if (result) {
             displayList.push(result.run);
             rawTextRuns.push(result.run);
@@ -932,8 +975,24 @@ export function interpretPage(
         break;
       }
 
-      // ── Marked content (skip) ───────────────────────────────────────
-      case 'BMC': case 'BDC': case 'EMC':
+      // ── Marked content ──────────────────────────────────────────────
+      // Only /ActualText matters for layout: Chromium/Skia wraps every Indic
+      // cluster whose glyphs have no 1:1 ToUnicode (conjuncts, reph, ि) in
+      // `/Span <</ActualText (…)>> BDC … EMC`; without it the text is lossy.
+      case 'BMC':
+        markedContent.push(null);
+        break;
+      case 'BDC': {
+        let props: PDFObject | undefined = ops[1];
+        if (props instanceof PDFName) props = getResource(page.resources, 'Properties', props.name, objects);
+        else if (props instanceof PDFRef) props = resolveRef(props, objects);
+        const actual = props instanceof PDFDict ? decodePdfTextString(props.get('ActualText')) : null;
+        markedContent.push(actual !== null ? { text: actual, consumed: false } : null);
+        break;
+      }
+      case 'EMC':
+        markedContent.pop();
+        break;
       case 'MP': case 'DP':
         break;
 
@@ -1137,6 +1196,7 @@ function showTextString(
   objects: Map<string, PDFObject>,
   page: PDFPageInfo,
   sourceInstructionIndex?: number,
+  actualText?: ActualTextSpan,
 ): ShowTextResult | null {
   const font = fonts.get(gs.textFont);
 
@@ -1261,6 +1321,12 @@ function showTextString(
       unicode = String.fromCharCode(charCode);
     }
 
+    // /ActualText replaces the whole span: the first glyph carries it, the rest nothing.
+    if (actualText) {
+      unicode = actualText.consumed ? '' : actualText.text;
+      actualText.consumed = true;
+    }
+
     // Get glyph width (in 1/1000 units of font size)
     const widthKey = isComposite
       ? (font?.encoding !== 'Identity-H' && font?.toCID?.has(charCode)
@@ -1298,6 +1364,7 @@ function showTextString(
       fontSize: Math.abs(tRm.d || tRm.a),
       textSpaceWidth: glyphWidth1000 / 1000,
       tRm,
+      ...(actualText ? { actualText: true } : {}),
     });
 
     text += unicode;
@@ -1363,6 +1430,11 @@ function showTextString(
   };
 }
 
+/** Obscure-symbol glyph eligible for apostrophe repair (never /ActualText output, which is authoritative). */
+function isObscureGlyph(g: GlyphPosition): boolean {
+  return !g.actualText && isObscureSymbol(g.unicode);
+}
+
 /**
  * Broken ToUnicode/Differences often map apostrophes to §/¶.
  * - Mid-word between letters → '
@@ -1372,11 +1444,11 @@ function repairObscureApostropheGlyphs(glyphs: GlyphPosition[]): void {
   if (glyphs.length === 0) return;
 
   const onlyObscure = glyphs.every(
-    g => !g.unicode || g.unicode === ' ' || g.unicode === '\u00A0' || isObscureSymbol(g.unicode),
+    g => !g.actualText && (!g.unicode || g.unicode === ' ' || g.unicode === '\u00A0' || isObscureSymbol(g.unicode)),
   );
   if (onlyObscure) {
     for (let gi = 0; gi < glyphs.length; gi++) {
-      if (isObscureSymbol(glyphs[gi].unicode)) {
+      if (isObscureGlyph(glyphs[gi])) {
         glyphs[gi] = { ...glyphs[gi], unicode: "'" };
       }
     }
@@ -1384,7 +1456,7 @@ function repairObscureApostropheGlyphs(glyphs: GlyphPosition[]): void {
   }
 
   for (let gi = 0; gi < glyphs.length; gi++) {
-    if (!isObscureSymbol(glyphs[gi].unicode)) continue;
+    if (!isObscureGlyph(glyphs[gi])) continue;
     const prev = gi > 0 ? glyphs[gi - 1].unicode : '';
     const next = gi + 1 < glyphs.length ? glyphs[gi + 1].unicode : '';
     const prevLetter = /[A-Za-z]/.test(prev.slice(-1));
@@ -1408,8 +1480,8 @@ function repairApostrophesAcrossRuns(runs: TextRun[]): void {
   for (let i = 0; i < runs.length; i++) {
     const run = runs[i];
     if (run.glyphs.length === 0) continue;
-    const onlyObscure = run.glyphs.every(g => isObscureSymbol(g.unicode));
-    if (!onlyObscure && !run.glyphs.some(g => isObscureSymbol(g.unicode))) continue;
+    const onlyObscure = run.glyphs.every(isObscureGlyph);
+    if (!onlyObscure && !run.glyphs.some(isObscureGlyph)) continue;
 
     // Find nearest letter glyphs on the same baseline to the left/right
     const baseline = run.glyphs[0].tRm.f;
@@ -1440,7 +1512,7 @@ function repairApostrophesAcrossRuns(runs: TextRun[]): void {
 
     if (leftLetter && rightLetter) {
       for (let gi = 0; gi < run.glyphs.length; gi++) {
-        if (isObscureSymbol(run.glyphs[gi].unicode)) {
+        if (isObscureGlyph(run.glyphs[gi])) {
           run.glyphs[gi] = { ...run.glyphs[gi], unicode: "'" };
         }
       }

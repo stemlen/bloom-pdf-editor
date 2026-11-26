@@ -74,7 +74,9 @@ export function caretIndexFromLineX(pdfX: number, line: TextLine): number {
       const glyph = run.glyphs[g];
       const mid = glyph.tRm.e + glyph.width / 2;
       const dist = Math.abs(pdfX - mid);
-      const glyphChars = Math.max(1, (glyph.unicode || '').length);
+      // A glyph carries as many characters as its Unicode: 0 for the trailing
+      // glyphs of an /ActualText cluster, several for a conjunct or ligature.
+      const glyphChars = (glyph.unicode || '').length;
       if (dist < bestDist) {
         bestDist = dist;
         bestIndex = pdfX < mid ? charOffset : charOffset + glyphChars;
@@ -106,19 +108,30 @@ export function lineXFromCaretIndex(line: TextLine, charIndex: number): number {
     return line.rightEdge;
   }
 
+  // Walk glyphs by the characters they carry (a Devanagari cluster may be one
+  // glyph with several characters, or several glyphs with one /ActualText).
   let offset = 0;
+  let clusterRight = -Infinity;
+  let afterCluster = false;
   for (let r = 0; r < line.runs.length; r++) {
     const run = line.runs[r];
+    let pos = offset;
     for (let g = 0; g < run.glyphs.length; g++) {
-      const idx = offset + g;
-      if (idx === charIndex) return run.glyphs[g].tRm.e;
-      if (idx === charIndex - 1) {
-        const glyph = run.glyphs[g];
-        return glyph.tRm.e + glyph.width;
+      const glyph = run.glyphs[g];
+      const len = (glyph.unicode || '').length;
+      if (len === 0) {
+        clusterRight = Math.max(clusterRight, glyph.tRm.e + glyph.width);
+        continue;
       }
+      if (afterCluster || pos === charIndex) return glyph.tRm.e;
+      if (charIndex > pos && charIndex < pos + len) return glyph.tRm.e + glyph.width;
+      pos += len;
+      clusterRight = glyph.tRm.e + glyph.width;
+      if (pos === charIndex) afterCluster = true;
     }
     offset += run.text.length;
   }
+  if (afterCluster && clusterRight > -Infinity) return clusterRight;
 
   const seg = segmentAtIndex(line, charIndex);
   if (seg) {
