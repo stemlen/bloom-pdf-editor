@@ -19,15 +19,17 @@
 import {
   PDFArray,
   PDFDict,
+  PDFHexString,
   PDFName,
   PDFNumber,
   PDFRef,
   PDFStream,
+  PDFString,
   type PDFObject,
   type PDFDocumentData,
-  type PDFPageInfo,
 } from '../types';
-import { resolveRef } from '../parser/parser';
+import { resolveRef, getPageContentBytes } from '../parser/parser';
+import { parseContentStream } from '../content/operator-lexer';
 import { applyFilters } from '../parser/filters';
 import { flateEncode } from '../parser/filters';
 import { isTrueTypeFontData, parseTTF, type TTFFont, type TTFTable } from '../fonts/truetype-parser';
@@ -52,6 +54,11 @@ export interface FontSubsetResult {
 /**
  * Collect all used glyph IDs per font across all pages.
  * Returns a Map of font stream object key → Set of glyph IDs used.
+ *
+ * Content is walked with the real content-stream lexer (escaped `\(` `\)` in
+ * literal strings, `]` inside TJ strings, q/Q-scoped Tf), including Form
+ * XObjects and annotation appearance streams: a glyph drawn anywhere must
+ * survive, or it disappears from the optimized file.
  */
 function collectUsedGlyphs(
   doc: PDFDocumentData,
@@ -63,30 +70,108 @@ function collectUsedGlyphs(
     stream: PDFStream;
   }>();
 
-  // Build font info cache: for each page, find fonts with embedded TrueType data
-  for (const page of doc.pages) {
-    const fonts = findPageFonts(page, doc.objects);
-    for (const fontInfo of fonts) {
-      if (!fontInfo.ttfData || !fontInfo.fontStreamKey) continue;
+  const entryFor = (fontInfo: FontInfo) => {
+    if (!fontInfo.ttfData || !fontInfo.fontStreamKey) return null;
+    let entry = result.get(fontInfo.fontStreamKey);
+    if (!entry) {
+      try {
+        entry = {
+          glyphIds: new Set<number>([0]), // Always keep .notdef
+          font: parseTTF(fontInfo.ttfData),
+          streamKey: fontInfo.fontStreamKey,
+          stream: fontInfo.fontStream!,
+        };
+      } catch {
+        return null;
+      }
+      result.set(fontInfo.fontStreamKey, entry);
+    }
+    return entry;
+  };
 
-      let entry = result.get(fontInfo.fontStreamKey);
-      if (!entry) {
-        try {
-          const ttf = parseTTF(fontInfo.ttfData);
-          entry = {
-            glyphIds: new Set<number>([0]), // Always keep .notdef
-            font: ttf,
-            streamKey: fontInfo.fontStreamKey,
-            stream: fontInfo.fontStream!,
-          };
-          result.set(fontInfo.fontStreamKey, entry);
-        } catch {
-          continue;
+  const fontsByResources = new Map<PDFDict, Map<string, FontInfo>>();
+  const fontsIn = (resources: PDFDict | undefined) => {
+    if (!resources) return new Map<string, FontInfo>();
+    let fonts = fontsByResources.get(resources);
+    if (!fonts) {
+      fonts = new Map(findFontsInResources(resources, doc.objects).map(f => [f.resourceName, f]));
+      fontsByResources.set(resources, fonts);
+    }
+    return fonts;
+  };
+
+  const scanned = new Set<PDFStream>();
+  const scanForm = (stream: PDFStream, inherited: PDFDict | undefined, depth: number) => {
+    if (scanned.has(stream) || depth > 12) return;
+    scanned.add(stream);
+    const res = stream.dict.get('Resources');
+    const resolved = res ? resolveRef(res, doc.objects) : undefined;
+    scanContent(stream.getBytes(), resolved instanceof PDFDict ? resolved : inherited, depth + 1);
+  };
+
+  const scanContent = (bytes: Uint8Array, resources: PDFDict | undefined, depth: number) => {
+    let instructions: ReturnType<typeof parseContentStream>;
+    try {
+      instructions = parseContentStream(bytes);
+    } catch {
+      return;
+    }
+    const fonts = fontsIn(resources);
+    let current: FontInfo | null = null;
+    const saved: (FontInfo | null)[] = [];
+    const add = (str: PDFObject | undefined) => {
+      if (!current || !(str instanceof PDFString || str instanceof PDFHexString)) return;
+      const entry = entryFor(current);
+      if (entry) addCharCodes(codesFromBytes(str.toBytes(), current.isComposite), current, entry.glyphIds, entry.font);
+    };
+    for (const inst of instructions) {
+      const ops = inst.operands;
+      switch (inst.operator) {
+        case 'q': saved.push(current); break;
+        case 'Q': if (saved.length) current = saved.pop()!; break;
+        case 'Tf': current = ops[0] instanceof PDFName ? fonts.get(ops[0].name) ?? null : null; break;
+        case 'Tj': case "'": add(ops[0]); break;
+        case '"': add(ops[2]); break;
+        case 'TJ':
+          if (ops[0] instanceof PDFArray) for (const item of ops[0].items) add(item);
+          break;
+        case 'Do': {
+          if (!(ops[0] instanceof PDFName) || !resources) break;
+          const xobjs = resources.get('XObject');
+          const dict = xobjs ? resolveRef(xobjs, doc.objects) : undefined;
+          const xobj = dict instanceof PDFDict ? dict.get(ops[0].name) : undefined;
+          const form = xobj ? resolveRef(xobj, doc.objects) : undefined;
+          if (form instanceof PDFStream && form.dict.getName('Subtype') === 'Form') scanForm(form, resources, depth);
+          break;
         }
       }
+    }
+  };
 
-      // Scan content streams for this page and collect char codes for this font
-      collectGlyphsFromPage(page, fontInfo, entry.glyphIds, entry.font, doc.objects);
+  for (const page of doc.pages) {
+    scanContent(getPageContentBytes(page, doc.objects), page.resources, 0);
+
+    // Annotation appearance streams (form fields, stamps, free text)
+    const annots = page.dict.get('Annots');
+    const annotArr = annots ? resolveRef(annots, doc.objects) : undefined;
+    if (!(annotArr instanceof PDFArray)) continue;
+    for (const a of annotArr.items) {
+      const annot = resolveRef(a, doc.objects);
+      const ap = annot instanceof PDFDict ? annot.get('AP') : undefined;
+      const apDict = ap ? resolveRef(ap, doc.objects) : undefined;
+      if (!(apDict instanceof PDFDict)) continue;
+      for (const key of ['N', 'R', 'D']) {
+        const v = apDict.get(key);
+        const appearance = v ? resolveRef(v, doc.objects) : undefined;
+        if (appearance instanceof PDFStream) {
+          scanForm(appearance, page.resources, 0);
+        } else if (appearance instanceof PDFDict) {
+          for (const [, state] of appearance.entries()) {
+            const st = resolveRef(state, doc.objects);
+            if (st instanceof PDFStream) scanForm(st, page.resources, 0);
+          }
+        }
+      }
     }
   }
 
@@ -96,6 +181,36 @@ function collectUsedGlyphs(
   }
 
   return result;
+}
+
+/** Character codes of a shown string: 2-byte for composite (Identity) fonts, else 1-byte. */
+function codesFromBytes(bytes: Uint8Array, isComposite: boolean): number[] {
+  const codes: number[] = [];
+  if (isComposite) {
+    for (let j = 0; j + 1 < bytes.length; j += 2) codes.push((bytes[j] << 8) | bytes[j + 1]);
+  } else {
+    for (const b of bytes) codes.push(b);
+  }
+  return codes;
+}
+
+function addCharCodes(codes: number[], fontInfo: FontInfo, glyphIds: Set<number>, ttf: TTFFont): void {
+  for (const code of codes) {
+    if (fontInfo.isComposite && fontInfo.cidToGidMap) {
+      // CID font: use CIDToGIDMap
+      if (code * 2 + 1 < fontInfo.cidToGidMap.length) {
+        const gid = (fontInfo.cidToGidMap[code * 2] << 8) | fontInfo.cidToGidMap[code * 2 + 1];
+        if (gid > 0) glyphIds.add(gid);
+      }
+    } else if (fontInfo.isComposite) {
+      // CID without CIDToGIDMap: identity mapping
+      if (code < ttf.numGlyphs) glyphIds.add(code);
+    } else {
+      // Simple font: (3,1)/(1,0) cmap, or a (3,0) symbol cmap at 0xF000 + code
+      const gid = ttf.cmapEntries.get(code) ?? ttf.cmapEntries.get(0xf000 + code) ?? 0;
+      if (gid > 0) glyphIds.add(gid);
+    }
+  }
 }
 
 interface FontInfo {
@@ -119,10 +234,8 @@ interface FontInfo {
   differences: Map<number, string>;
 }
 
-function findPageFonts(page: PDFPageInfo, objects: Map<string, PDFObject>): FontInfo[] {
+function findFontsInResources(resources: PDFDict, objects: Map<string, PDFObject>): FontInfo[] {
   const result: FontInfo[] = [];
-  const resources = page.resources;
-  if (!resources) return result;
 
   const fontDictRef = resources.get('Font');
   if (!fontDictRef) return result;
@@ -238,212 +351,6 @@ function findPageFonts(page: PDFPageInfo, objects: Map<string, PDFObject>): Font
   }
 
   return result;
-}
-
-/**
- * Scan content streams of a page for text-showing operators and collect
- * the character codes used with a specific font.
- */
-function collectGlyphsFromPage(
-  page: PDFPageInfo,
-  fontInfo: FontInfo,
-  glyphIds: Set<number>,
-  ttf: TTFFont,
-  objects: Map<string, PDFObject>,
-): void {
-  // Get content stream bytes
-  for (const contentRef of page.contentRefs) {
-    const stream = resolveRef(contentRef, objects);
-    if (!(stream instanceof PDFStream)) continue;
-
-    let bytes: Uint8Array;
-    try {
-      bytes = stream.getBytes();
-    } catch {
-      continue;
-    }
-
-    // Simple token-level scanner for text operators.
-    // We track Tf to know which font is active, then collect bytes from Tj/TJ/' /".
-    const text = bytesToString(bytes);
-    scanContentForGlyphs(text, fontInfo, glyphIds, ttf);
-  }
-}
-
-function bytesToString(bytes: Uint8Array): string {
-  let s = '';
-  for (let i = 0; i < bytes.length; i++) {
-    s += String.fromCharCode(bytes[i]);
-  }
-  return s;
-}
-
-/**
- * Simple content stream scanner that tracks font selection (Tf) and collects
- * character codes from text-showing operators (Tj, TJ, ', ").
- */
-function scanContentForGlyphs(
-  content: string,
-  fontInfo: FontInfo,
-  glyphIds: Set<number>,
-  ttf: TTFFont,
-): void {
-  const fontTag = `/${fontInfo.resourceName}`;
-  const currentFont: string | null = null;
-
-  // Regex-based token scanner: find Tf, Tj, TJ, ', " operators
-  // Tf: /FontName size Tf
-  const tfPattern = /\/([\w+.-]+)\s+[\d.]+\s+Tf/g;
-  const tjPattern = /\(([^)]*)\)\s*Tj/g;
-  const tjHexPattern = /<([0-9a-fA-F\s]*)>\s*Tj/g;
-  const tJArrayPattern = /\[([^\]]*)\]\s*TJ/g;
-
-  // Track font by scanning Tf operators
-  let match: RegExpExecArray | null;
-
-  // Collect all Tf positions
-  const fontSwitches: Array<{ pos: number; font: string }> = [];
-  while ((match = tfPattern.exec(content)) !== null) {
-    fontSwitches.push({ pos: match.index, font: match[1] });
-  }
-
-  // For each text operator, find the active font
-  function getFontAt(pos: number): string | null {
-    let active: string | null = null;
-    for (const fs of fontSwitches) {
-      if (fs.pos <= pos) active = fs.font;
-      else break;
-    }
-    return active;
-  }
-
-  function addCharCodes(codes: number[]): void {
-    for (const code of codes) {
-      if (fontInfo.isComposite && fontInfo.cidToGidMap) {
-        // CID font: use CIDToGIDMap
-        if (code * 2 + 1 < fontInfo.cidToGidMap.length) {
-          const gid = (fontInfo.cidToGidMap[code * 2] << 8) | fontInfo.cidToGidMap[code * 2 + 1];
-          if (gid > 0) glyphIds.add(gid);
-        }
-      } else if (fontInfo.isComposite) {
-        // CID without CIDToGIDMap: identity mapping
-        if (code < ttf.numGlyphs) glyphIds.add(code);
-      } else {
-        // Simple font: use cmap
-        const gid = ttf.cmapEntries.get(code) ?? 0;
-        if (gid > 0) glyphIds.add(gid);
-      }
-    }
-  }
-
-  // Scan literal string Tj: (text) Tj
-  while ((match = tjPattern.exec(content)) !== null) {
-    const font = getFontAt(match.index);
-    if (font !== fontInfo.resourceName) continue;
-    const raw = match[1];
-    const codes = decodePDFStringBytes(raw, fontInfo.isComposite);
-    addCharCodes(codes);
-  }
-
-  // Scan hex string Tj: <hex> Tj
-  while ((match = tjHexPattern.exec(content)) !== null) {
-    const font = getFontAt(match.index);
-    if (font !== fontInfo.resourceName) continue;
-    const hex = match[1].replace(/\s/g, '');
-    const codes = decodeHexBytes(hex, fontInfo.isComposite);
-    addCharCodes(codes);
-  }
-
-  // Scan TJ arrays: [(text) num (text) ...] TJ
-  while ((match = tJArrayPattern.exec(content)) !== null) {
-    const font = getFontAt(match.index);
-    if (font !== fontInfo.resourceName) continue;
-    const arrayContent = match[1];
-    // Extract string operands from the array
-    const strLitPattern = /\(([^)]*)\)/g;
-    const strHexPattern = /<([0-9a-fA-F\s]*)>/g;
-    let sm: RegExpExecArray | null;
-    while ((sm = strLitPattern.exec(arrayContent)) !== null) {
-      const codes = decodePDFStringBytes(sm[1], fontInfo.isComposite);
-      addCharCodes(codes);
-    }
-    while ((sm = strHexPattern.exec(arrayContent)) !== null) {
-      const hex = sm[1].replace(/\s/g, '');
-      const codes = decodeHexBytes(hex, fontInfo.isComposite);
-      addCharCodes(codes);
-    }
-  }
-}
-
-function decodePDFStringBytes(raw: string, isComposite: boolean): number[] {
-  const codes: number[] = [];
-  // Decode escape sequences
-  let i = 0;
-  const bytes: number[] = [];
-  while (i < raw.length) {
-    if (raw[i] === '\\') {
-      i++;
-      if (i >= raw.length) break;
-      switch (raw[i]) {
-        case 'n': bytes.push(0x0a); i++; break;
-        case 'r': bytes.push(0x0d); i++; break;
-        case 't': bytes.push(0x09); i++; break;
-        case 'b': bytes.push(0x08); i++; break;
-        case 'f': bytes.push(0x0c); i++; break;
-        case '(': bytes.push(0x28); i++; break;
-        case ')': bytes.push(0x29); i++; break;
-        case '\\': bytes.push(0x5c); i++; break;
-        default:
-          // Octal
-          if (raw[i] >= '0' && raw[i] <= '7') {
-            let octal = raw[i];
-            i++;
-            if (i < raw.length && raw[i] >= '0' && raw[i] <= '7') { octal += raw[i]; i++; }
-            if (i < raw.length && raw[i] >= '0' && raw[i] <= '7') { octal += raw[i]; i++; }
-            bytes.push(parseInt(octal, 8));
-          } else {
-            bytes.push(raw.charCodeAt(i) & 0xff);
-            i++;
-          }
-      }
-    } else {
-      bytes.push(raw.charCodeAt(i) & 0xff);
-      i++;
-    }
-  }
-
-  if (isComposite) {
-    // 2-byte character codes for CID fonts
-    for (let j = 0; j + 1 < bytes.length; j += 2) {
-      codes.push((bytes[j] << 8) | bytes[j + 1]);
-    }
-  } else {
-    // 1-byte character codes
-    for (const b of bytes) codes.push(b);
-  }
-  return codes;
-}
-
-function decodeHexBytes(hex: string, isComposite: boolean): number[] {
-  const codes: number[] = [];
-  // Pad odd-length with trailing 0
-  const padded = hex.length % 2 === 1 ? hex + '0' : hex;
-
-  if (isComposite) {
-    // 2-byte pairs for CID
-    for (let i = 0; i + 3 < padded.length; i += 4) {
-      codes.push(parseInt(padded.substring(i, i + 4), 16));
-    }
-    // Handle remaining 2-byte pair
-    if (padded.length % 4 === 2) {
-      codes.push(parseInt(padded.substring(padded.length - 2), 16));
-    }
-  } else {
-    for (let i = 0; i < padded.length; i += 2) {
-      codes.push(parseInt(padded.substring(i, i + 2), 16));
-    }
-  }
-  return codes;
 }
 
 // ─── Composite glyph expansion ──────────────────────────────────────────────
