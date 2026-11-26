@@ -12,7 +12,11 @@ export class MarkdownExporter {
   async export(udm: UnifiedDocumentModel): Promise<ExportResult> {
     const blocks = extractContentBlocks(udm);
     const lines: string[] = [];
-    if (udm.metadata.title) lines.push(`# ${udm.metadata.title}`, '');
+    // The title is often the first heading itself; don't print it twice.
+    const title = udm.metadata.title?.trim();
+    const first = blocks[0];
+    const firstText = first && 'text' in first ? first.text.trim() : '';
+    if (title && title !== firstText) lines.push(`# ${title}`, '');
 
     for (const b of blocks) {
       switch (b.kind) {
