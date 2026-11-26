@@ -132,7 +132,11 @@ export function getOverlayFontStyle(fontName: string, fontData?: FontData): {
   };
 }
 
-/** Convert a canvas CSS‐pixel mouse position to PDF user‐space coordinates. */
+/**
+ * Convert a canvas CSS‐pixel mouse position to PDF user‐space coordinates.
+ * `pageWidth`/`pageHeight` are the page as displayed; pass the page's
+ * /Rotate as `rotate` to undo the turn the renderer applies to the canvas.
+ */
 export function canvasToPdf(
   cssX: number,
   cssY: number,
@@ -141,11 +145,54 @@ export function canvasToPdf(
   pageHeight: number,
   mediaBoxX: number,
   mediaBoxY: number,
+  rotate = 0,
 ): { pdfX: number; pdfY: number } {
-  return {
-    pdfX: cssX / scale + mediaBoxX,
-    pdfY: (mediaBoxY + pageHeight) - cssY / scale,
-  };
+  const x = cssX / scale;
+  const y = cssY / scale;
+  switch (((rotate % 360) + 360) % 360) {
+    case 90:
+      return { pdfX: mediaBoxX + y, pdfY: mediaBoxY + x };
+    case 180:
+      return { pdfX: mediaBoxX + pageWidth - x, pdfY: mediaBoxY + y };
+    case 270:
+      return { pdfX: mediaBoxX + pageHeight - y, pdfY: mediaBoxY + pageWidth - x };
+    default:
+      return { pdfX: x + mediaBoxX, pdfY: (mediaBoxY + pageHeight) - y };
+  }
+}
+
+/**
+ * Placed images and signatures are positioned in the page as displayed (PDF
+ * points, origin bottom-left of the turned page). On a /Rotate page, move a
+ * box from that space into the page's own user space: returns its top-left
+ * for drawing at the same size, turned by `rotation` degrees clockwise so it
+ * still looks upright once the viewer applies /Rotate.
+ */
+export function displayBoxToPage(
+  x: number,
+  yTop: number,
+  width: number,
+  height: number,
+  page: { mediaBox: { x: number; y: number; width: number; height: number }; rotate: number },
+  /**
+   * The height `yTop` is measured down from. Signatures use the displayed
+   * height (the default); floating images are laid out against the MediaBox
+   * height whatever the rotation, so they pass `page.mediaBox.height`.
+   */
+  yReferenceHeight?: number,
+): { x: number; yTop: number; rotation: number } {
+  const rotate = ((page.rotate % 360) + 360) % 360;
+  if (rotate === 0) return { x, yTop, rotation: 0 };
+  const { mediaBox: mb } = page;
+  const sideways = rotate === 90 || rotate === 270;
+  const dispW = sideways ? mb.height : mb.width;
+  const dispH = sideways ? mb.width : mb.height;
+  // Centre of the box in displayed canvas units (1 pt = 1 unit, origin top-left)…
+  const cx = x + width / 2 - mb.x;
+  const cy = mb.y + (yReferenceHeight ?? dispH) - (yTop - height / 2);
+  // …and in the page's user space.
+  const c = canvasToPdf(cx, cy, 1, dispW, dispH, mb.x, mb.y, rotate);
+  return { x: c.pdfX - width / 2, yTop: c.pdfY + height / 2, rotation: -rotate };
 }
 
 /** Convert PDF user‐space coordinates to canvas CSS pixels. */

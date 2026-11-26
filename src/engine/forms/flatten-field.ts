@@ -44,7 +44,12 @@ export function buildAppearanceStream(
   const h = rect.height;
 
   let body = 'q\n';
-  body += rgbOperators(opts.textColor);
+  // Background first, then the border on top of it, then the value in the
+  // text colour (painting the background last hid the value).
+  if (widget.backgroundColor) {
+    body += rgbOperators(widget.backgroundColor);
+    body += `${rect.x} ${rect.y} ${w} ${h} re f `;
+  }
 
   if (opts.drawBorder && widget.borderWidth > 0) {
     body += rgbOperators(widget.borderColor);
@@ -52,10 +57,7 @@ export function buildAppearanceStream(
     body += `${rect.x} ${rect.y} ${w} ${h} re S `;
   }
 
-  if (widget.backgroundColor) {
-    body += rgbOperators(widget.backgroundColor);
-    body += `${rect.x} ${rect.y} ${w} ${h} re f `;
-  }
+  body += rgbOperators(opts.textColor);
 
   switch (widget.fieldType) {
     case 'Tx': {
