@@ -269,6 +269,7 @@ export {
   serializeToString,
   serializeIndirectObject,
   concatBytes,
+  isolateGraphicsState,
 } from './editor/stream-compiler';
 export {
   createAnnotationDict,
@@ -423,8 +424,13 @@ export {
   setChoiceFieldValue,
   regenerateNeedAppearances,
   runCalculationOrder,
+  setComplexTextRasterizer,
+  isWinAnsiEncodable,
+  rasterLineImage,
 } from './forms';
 export type {
+  RasterTextLine,
+  ComplexTextRasterizer,
   AcroFormFieldType,
   AcroFormWidget,
   AcroFormField,

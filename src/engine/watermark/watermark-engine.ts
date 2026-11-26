@@ -32,6 +32,7 @@ import {
 } from '../types';
 import { resolveRef } from '../parser/parser';
 import { flateEncode } from '../parser/filters';
+import { rasterLineImage, type RasterTextLine } from '../forms/text-appearance';
 
 // ─── Watermark types ────────────────────────────────────────────────────────
 
@@ -70,6 +71,11 @@ export interface TextWatermark extends WatermarkBase {
   position: WatermarkPosition | [number, number];
   /** Spacing between tiles when tiling (in points) */
   tileSpacing?: number;
+  /**
+   * The text pre-shaped by the host as an image, for text the standard fonts
+   * can't encode (Hindi, CJK…). Drawn instead of `text` when present.
+   */
+  raster?: RasterTextLine;
 }
 
 export interface ImageWatermark extends WatermarkBase {
@@ -78,6 +84,11 @@ export interface ImageWatermark extends WatermarkBase {
   imageBytes: Uint8Array;
   /** Image MIME type */
   mimeType: 'image/jpeg' | 'image/png';
+  /**
+   * Transparency of the image as 8-bit coverage samples (Flate-compressed
+   * `data`, plus the decoded `samples`), written as the image's /SMask.
+   */
+  softMask?: { widthPx: number; heightPx: number; data: Uint8Array; samples: Uint8Array };
   /** Width in PDF points (user space units) */
   width: number;
   /** Height in PDF points */
@@ -129,6 +140,8 @@ export interface ShapeWatermark extends WatermarkBase {
   width: number;
   height: number;
   tileSpacing?: number;
+  /** Pre-shaped text image, as for {@link TextWatermark.raster}. */
+  raster?: RasterTextLine;
 }
 
 export type Watermark = TextWatermark | ImageWatermark | PatternWatermark | ShapeWatermark;
@@ -159,7 +172,7 @@ export function buildTextWatermarkContent(
 
   lines.push(`/${wm.fontName} ${wm.fontSize} Tf`);
 
-  const wmWidth = wm.text.length * wm.fontSize * 0.5;
+  const wmWidth = wm.raster ? wm.raster.advancePt : wm.text.length * wm.fontSize * 0.5;
   const wmHeight = wm.fontSize;
 
   if (wm.tile) {
@@ -180,10 +193,7 @@ export function buildTextWatermarkContent(
           const sin = Math.sin(rad);
           lines.push(`${fmtNum(cos)} ${fmtNum(sin)} ${fmtNum(-sin)} ${fmtNum(cos)} 0 0 cm`);
         }
-        lines.push('BT');
-        lines.push(`${fmtNum(-wmWidth / 2)} ${fmtNum(-wmHeight * 0.3)} Td`);
-        lines.push(`(${escapePDFString(wm.text)}) Tj`);
-        lines.push('ET');
+        lines.push(...watermarkTextOps(wm, -wmWidth / 2, -wmHeight * 0.3));
         lines.push('Q');
       }
     }
@@ -200,15 +210,33 @@ export function buildTextWatermarkContent(
       lines.push(`${fmtNum(cos)} ${fmtNum(sin)} ${fmtNum(-sin)} ${fmtNum(cos)} 0 0 cm`);
     }
 
-    lines.push('BT');
-    lines.push(`${fmtNum(-wmWidth / 2)} ${fmtNum(-wmHeight * 0.3)} Td`);
-    lines.push(`(${escapePDFString(wm.text)}) Tj`);
-    lines.push('ET');
+    lines.push(...watermarkTextOps(wm, -wmWidth / 2, -wmHeight * 0.3));
     lines.push('Q');
   }
 
   lines.push('Q');
   return stringToBytes(lines.join('\n') + '\n');
+}
+
+/**
+ * XObject name of a watermark's pre-shaped text image. The ImWM_ prefix is
+ * what the watermark remover recognises as ours.
+ */
+export function watermarkTextImageName(wm: { id: string }): string {
+  return `ImWM_${wm.id.substring(0, 8).replace(/[^A-Za-z0-9_-]/g, '_')}_tx`;
+}
+
+/** Operators that draw a watermark's text with its baseline starting at (x, y). */
+function watermarkTextOps(
+  wm: { id: string; text: string; raster?: RasterTextLine },
+  x: number,
+  y: number,
+): string[] {
+  const r = wm.raster;
+  if (r) {
+    return [`q ${fmtNum(r.widthPt)} 0 0 ${fmtNum(r.heightPt)} ${fmtNum(x)} ${fmtNum(y - r.baselinePt)} cm /${watermarkTextImageName(wm)} Do Q`];
+  }
+  return ['BT', `${fmtNum(x)} ${fmtNum(y)} Td`, `(${escapePDFString(wm.text)}) Tj`, 'ET'];
 }
 
 /**
@@ -422,13 +450,10 @@ export function buildShapeWatermarkContent(
       lines.push(`${fmtNum(tr)} ${fmtNum(tg)} ${fmtNum(tb)} rg`);
       lines.push(`/${wm.fontName} ${wm.fontSize} Tf`);
       
-      const textWidth = wm.text.length * wm.fontSize * 0.5;
+      const textWidth = wm.raster ? wm.raster.advancePt : wm.text.length * wm.fontSize * 0.5;
       const textHeight = wm.fontSize;
-      
-      lines.push('BT');
-      lines.push(`${fmtNum(-textWidth / 2)} ${fmtNum(-textHeight * 0.3)} Td`);
-      lines.push(`(${escapePDFString(wm.text)}) Tj`);
-      lines.push('ET');
+
+      lines.push(...watermarkTextOps(wm, -textWidth / 2, -textHeight * 0.3));
     }
 
     lines.push('Q');
@@ -456,6 +481,27 @@ export function createOpacityExtGState(
   return { dict, name: gsName };
 }
 
+/** Pixel size from a JPEG's SOFn header, or null when it can't be read. */
+export function jpegPixelSize(bytes: Uint8Array): { width: number; height: number } | null {
+  if (bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let i = 2;
+  while (i + 9 < bytes.length) {
+    if (bytes[i] !== 0xff) { i++; continue; }
+    const marker = bytes[i + 1];
+    if (marker === 0xff) { i++; continue; }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { i += 2; continue; }
+    const len = (bytes[i + 2] << 8) | bytes[i + 3];
+    // SOF0–SOF15, except DHT (C4), JPG (C8) and DAC (CC).
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      const height = (bytes[i + 5] << 8) | bytes[i + 6];
+      const width = (bytes[i + 7] << 8) | bytes[i + 8];
+      return width > 0 && height > 0 ? { width, height } : null;
+    }
+    i += 2 + len;
+  }
+  return null;
+}
+
 /**
  * Create an Image XObject for an image watermark.
  */
@@ -465,8 +511,13 @@ export function createWatermarkImageXObject(
   const dict = new PDFDict();
   dict.set('Type', new PDFName('XObject'));
   dict.set('Subtype', new PDFName('Image'));
-  dict.set('Width', new PDFNumber(wm.width));
-  dict.set('Height', new PDFNumber(wm.height));
+  // /Width and /Height are the image's pixel size (wm.width/height are its
+  // size on the page, in points); readers mis-decode the samples otherwise.
+  const px = (wm.mimeType === 'image/jpeg' ? jpegPixelSize(wm.imageBytes) : null)
+    ?? (wm.softMask ? { width: wm.softMask.widthPx, height: wm.softMask.heightPx } : null)
+    ?? { width: Math.round(wm.width), height: Math.round(wm.height) };
+  dict.set('Width', new PDFNumber(px.width));
+  dict.set('Height', new PDFNumber(px.height));
   dict.set('ColorSpace', new PDFName('DeviceRGB'));
   dict.set('BitsPerComponent', new PDFNumber(8));
 
@@ -518,11 +569,27 @@ export function applyWatermarkToPage(
   switch (watermark.type) {
     case 'text':
       registerFontInResources(page, objects, watermark.fontName, getNextObjNum);
+      registerTextRaster(page, objects, watermark, getNextObjNum);
       watermarkContent = buildTextWatermarkContent(watermark, pageWidth, pageHeight, originX, originY);
       break;
     case 'image': {
       const imgWm = watermark as ImageWatermark;
       const { stream, name } = createWatermarkImageXObject(imgWm);
+      if (imgWm.softMask) {
+        const m = imgWm.softMask;
+        const maskDict = new PDFDict();
+        maskDict.set('Type', new PDFName('XObject'));
+        maskDict.set('Subtype', new PDFName('Image'));
+        maskDict.set('Width', new PDFNumber(m.widthPx));
+        maskDict.set('Height', new PDFNumber(m.heightPx));
+        maskDict.set('ColorSpace', new PDFName('DeviceGray'));
+        maskDict.set('BitsPerComponent', new PDFNumber(8));
+        maskDict.set('Filter', new PDFName('FlateDecode'));
+        maskDict.set('Length', new PDFNumber(m.data.length));
+        const maskRef = new PDFRef(getNextObjNum(), 0);
+        objects.set(maskRef.toKey(), new PDFStream(maskDict, m.data, m.samples));
+        stream.dict.set('SMask', maskRef);
+      }
       const objNum = getNextObjNum();
       const objRef = new PDFRef(objNum, 0);
       objects.set(objRef.toKey(), stream);
@@ -530,7 +597,8 @@ export function applyWatermarkToPage(
       // Register in page Resources
       registerXObjectInResources(page, objects, name.replace('/', ''), objRef);
 
-      watermarkContent = buildImageWatermarkContent(imgWm, pageWidth, pageHeight, name, originX, originY);
+      // `name` carries a leading slash; the content builder adds its own.
+      watermarkContent = buildImageWatermarkContent(imgWm, pageWidth, pageHeight, name.replace('/', ''), originX, originY);
       break;
     }
     case 'pattern':
@@ -541,6 +609,7 @@ export function applyWatermarkToPage(
     case 'shape': {
       const shapeWm = watermark as ShapeWatermark;
       registerFontInResources(page, objects, shapeWm.fontName, getNextObjNum);
+      registerTextRaster(page, objects, shapeWm, getNextObjNum);
       watermarkContent = buildShapeWatermarkContent(shapeWm, pageWidth, pageHeight, originX, originY);
       break;
     }
@@ -589,6 +658,23 @@ export function applyWatermarkToPage(
   }
 
   return combined;
+}
+
+/** Add a watermark's pre-shaped text image (and its soft mask) to the page resources. */
+function registerTextRaster(
+  page: PDFPageInfo,
+  objects: Map<string, PDFObject>,
+  wm: TextWatermark | ShapeWatermark,
+  getNextObjNum: () => number,
+): void {
+  if (!wm.raster) return;
+  const { image, smask } = rasterLineImage(wm.raster);
+  const smaskRef = new PDFRef(getNextObjNum(), 0);
+  objects.set(smaskRef.toKey(), smask);
+  image.dict.set('SMask', smaskRef);
+  const imageRef = new PDFRef(getNextObjNum(), 0);
+  objects.set(imageRef.toKey(), image);
+  registerXObjectInResources(page, objects, watermarkTextImageName(wm), imageRef);
 }
 
 /**
