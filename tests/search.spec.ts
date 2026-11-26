@@ -80,6 +80,27 @@ test("finds words drawn as several text runs (Hindi and Latin) and won't write l
   expect(errors).toEqual([]);
 });
 
+test("search highlights turn with a rotated page", async ({ page }) => {
+  await openInEditor(page);
+  const thumbs = page.getByTestId("page-thumb");
+  await thumbs.nth(0).hover();
+  await page.getByRole("button", { name: "Rotate page 1" }).click();
+  const canvas = page.getByTestId("page-canvas");
+  // Landscape once turned.
+  await expect.poll(async () => { const b = (await canvas.boundingBox())!; return b.width > b.height; }).toBe(true);
+
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByPlaceholder("Search text in PDF…").fill("Quarterly Garden Report");
+  await expect(page.getByTestId("match-count")).toHaveText("1/1");
+  const hl = (await page.getByTestId("search-highlight").boundingBox())!;
+  const c = (await canvas.boundingBox())!;
+  // The title runs along the top of the unrotated page; turned 90° clockwise it reads
+  // top-to-bottom near the right edge, so its highlight is tall, narrow and on the right.
+  expect(hl.height).toBeGreaterThan(hl.width * 3);
+  expect(hl.x - c.x).toBeGreaterThan(c.width * 0.75);
+  expect(hl.y - c.y).toBeLessThan(c.height * 0.5);
+});
+
 test("match case toggle", async ({ page }) => {
   await openInEditor(page);
   await page.getByRole("button", { name: "Toggle Find & Replace" }).click();

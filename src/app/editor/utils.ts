@@ -163,6 +163,38 @@ export function pdfToCanvas(
   };
 }
 
+/**
+ * CSS rectangle on the displayed page for a box given in unrotated page space (PDF units).
+ * The renderer turns /Rotate pages clockwise, so overlays must turn the same way.
+ */
+export function pdfBoxToCanvasRect(
+  box: { x: number; y: number; width: number; height: number },
+  page: { mediaBox: { x: number; y: number; width: number; height: number }; rotate: number },
+  scale: number,
+): { left: number; top: number; width: number; height: number } {
+  const { mediaBox } = page;
+  const rot = ((page.rotate % 360) + 360) % 360;
+  const dispW = (rot === 90 || rot === 270 ? mediaBox.height : mediaBox.width) * scale;
+  const dispH = (rot === 90 || rot === 270 ? mediaBox.width : mediaBox.height) * scale;
+  const corners = [
+    pdfToCanvas(box.x, box.y + box.height, scale, mediaBox.height, mediaBox.x, mediaBox.y),
+    pdfToCanvas(box.x + box.width, box.y, scale, mediaBox.height, mediaBox.x, mediaBox.y),
+  ].map(({ cssX: x, cssY: y }) => {
+    if (rot === 90) return { x: dispW - y, y: x };
+    if (rot === 180) return { x: dispW - x, y: dispH - y };
+    if (rot === 270) return { x: y, y: dispH - x };
+    return { x, y };
+  });
+  const left = Math.min(corners[0].x, corners[1].x);
+  const top = Math.min(corners[0].y, corners[1].y);
+  return {
+    left,
+    top,
+    width: Math.abs(corners[1].x - corners[0].x),
+    height: Math.abs(corners[1].y - corners[0].y),
+  };
+}
+
 /** Hit-test: find the TextRun under a given PDF coordinate. */
 export function hitTestTextRuns(
   pdfX: number,

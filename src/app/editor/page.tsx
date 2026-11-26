@@ -22,7 +22,7 @@ import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, Te
 import type { EditorTool, ToolDef, PathType, DrawnPath, FloatingText, FloatingImage, DrawMode, RemovedImageRecord } from './types';
 import { TOOLS } from './types';
 import {
-  canvasToPdf, pdfToCanvas, hexToRGB,
+  canvasToPdf, pdfToCanvas, pdfBoxToCanvasRect, hexToRGB,
   hitTestTextLine, findNearestTextLine, caretIndexFromLineX,
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
@@ -6417,16 +6417,14 @@ export default function EditorPage() {
               .filter(m => m.pageIndex === currentPage)
               .map((m) => {
                 const isCurrent = searchResults[activeMatchIndex]?.id === m.id;
-                const mediaBox = doc?.pages[currentPage]?.mediaBox;
-                const pageH = mediaBox?.height || 0;
-                const mbX = mediaBox?.x || 0;
-                const mbY = mediaBox?.y || 0;
-
-                const { cssX: x1, cssY: y1 } = pdfToCanvas(m.pdfX, m.pdfY + m.pdfHeight, scale, pageH, mbX, mbY);
-                const { cssX: x2, cssY: y2 } = pdfToCanvas(m.pdfX + m.pdfWidth, m.pdfY, scale, pageH, mbX, mbY);
-
-                const w = Math.max(Math.abs(x2 - x1), 4);
-                const h = Math.max(Math.abs(y2 - y1), 8);
+                const pageInfo = doc?.pages[currentPage];
+                if (!pageInfo) return null;
+                // Turned with the page on /Rotate pages, like the renderer does.
+                const rect = pdfBoxToCanvasRect(
+                  { x: m.pdfX, y: m.pdfY, width: m.pdfWidth, height: m.pdfHeight },
+                  pageInfo,
+                  scale,
+                );
 
                 return (
                   <div
@@ -6436,11 +6434,12 @@ export default function EditorPage() {
                         ? 'bg-amber-400/80 border-2 border-amber-600 ring-4 ring-amber-400/40 shadow-lg scale-[1.04] z-30'
                         : 'bg-yellow-300/45 border border-yellow-500/80 shadow-sm z-20 hover:bg-yellow-300/70'
                     }`}
+                    data-testid="search-highlight"
                     style={{
-                      left: Math.min(x1, x2),
-                      top: Math.min(y1, y2),
-                      width: w,
-                      height: h,
+                      left: rect.left,
+                      top: rect.top,
+                      width: Math.max(rect.width, 4),
+                      height: Math.max(rect.height, 4),
                     }}
                   />
                 );
