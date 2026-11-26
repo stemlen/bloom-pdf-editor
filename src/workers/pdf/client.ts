@@ -44,6 +44,8 @@ export function adoptDocument(target: PDFDocumentData, source: PDFDocumentData):
   target.pages = source.pages;
   target.info = source.info;
   target.rawBytes = source.rawBytes;
+  if (source.encryptionKey) target.encryptionKey = source.encryptionKey;
+  else delete target.encryptionKey;
 }
 
 function encodeForWorker(doc: PDFDocumentData) {

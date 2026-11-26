@@ -68,6 +68,7 @@ export interface EncodedDocument {
   pages: WirePage[];
   info: PDFDocumentData['info'];
   rawBytes: Uint8Array;
+  encryptionKey?: Uint8Array;
 }
 
 export interface EncodeResult {
@@ -136,6 +137,8 @@ export function encodeDocument(doc: PDFDocumentData): EncodeResult {
     })),
     info: { ...doc.info },
     rawBytes: noteBytes(doc.rawBytes),
+    // Copied rather than transferred: it is small and may share a buffer.
+    ...(doc.encryptionKey ? { encryptionKey: doc.encryptionKey.slice() } : {}),
   };
   return { doc: encoded, buffers: Array.from(buffers) };
 }
@@ -201,5 +204,6 @@ export function decodeDocument(encoded: EncodedDocument): PDFDocumentData {
     pages,
     info: { ...encoded.info },
     rawBytes: encoded.rawBytes,
+    ...(encoded.encryptionKey ? { encryptionKey: encoded.encryptionKey } : {}),
   };
 }

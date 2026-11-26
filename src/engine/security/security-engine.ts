@@ -140,7 +140,13 @@ export class SecurityEngine implements ISecurityEngine {
       algorithm: detectAlgorithm(enc),
     };
 
-    await decryptDocumentObjects(doc, ctx);
+    // A document that is already open holds plaintext objects; decrypting them
+    // again would garble them. Otherwise decrypt in place and keep the key so
+    // the writer can encrypt again on save.
+    if (!doc.encryptionKey) {
+      await decryptDocumentObjects(doc, ctx);
+      doc.encryptionKey = auth.fileKey;
+    }
     this.contexts.set(doc, ctx);
 
     const rawPerms = this.permissions.fromEncryptDict(enc);
@@ -164,6 +170,7 @@ export class SecurityEngine implements ISecurityEngine {
     if (result.context.encrypt?.ref) {
       result.doc.objects.delete(result.context.encrypt.ref.toKey());
     }
+    delete result.doc.encryptionKey;
     this.contexts.delete(result.doc);
     return result.doc;
   }
