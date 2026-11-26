@@ -41,8 +41,11 @@ export class SecureOptimizer implements ISecureOptimizer {
     try {
       const dedup = deduplicateStreams(doc.objects);
       deduplicatedStreams = dedup.groups?.length ?? dedup.refMap.size;
+      // Merging happens in the optimized save; nothing is rewritten here.
       if (deduplicatedStreams > 0) {
-        notes.push(`Deduplicated ${deduplicatedStreams} stream group(s)`);
+        notes.push(
+          `Found ${deduplicatedStreams} duplicate stream ${deduplicatedStreams === 1 ? 'group' : 'groups'} (merged by an optimized save)`,
+        );
       }
     } catch {
       notes.push('Stream deduplication skipped');
