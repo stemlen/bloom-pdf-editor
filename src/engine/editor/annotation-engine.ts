@@ -31,6 +31,8 @@ import {
   type PDFRectangle,
 } from '../types';
 import { flateEncode } from '../parser/filters';
+// Text strings (author, comment) may be any script: UTF-16BE when not plain ASCII.
+import { encodeTextString } from '../forms/apply-field';
 
 // ─── Annotation types ───────────────────────────────────────────────────────
 
@@ -162,10 +164,10 @@ export function createAnnotationDict(
   }
 
   if (annotation.author) {
-    dict.set('T', new PDFString(annotation.author));
+    dict.set('T', encodeTextString(annotation.author));
   }
   if (annotation.contents) {
-    dict.set('Contents', new PDFString(annotation.contents));
+    dict.set('Contents', encodeTextString(annotation.contents));
   }
   if (annotation.modDate) {
     dict.set('M', new PDFString(annotation.modDate));
@@ -194,7 +196,7 @@ export function createAnnotationDict(
         `/${annotation.fontName} ${annotation.fontSize} Tf ` +
         `${annotation.textColor[0]} ${annotation.textColor[1]} ${annotation.textColor[2]} rg`,
       ));
-      dict.set('Contents', new PDFString(annotation.text));
+      dict.set('Contents', encodeTextString(annotation.text));
       if (annotation.borderWidth > 0) {
         dict.set('BS', buildBorderStyle(annotation.borderWidth));
       }
