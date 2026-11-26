@@ -1,7 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
 
-const PORT = Number(process.env.E2E_PORT ?? 4174);
-
 // Runs against the static export in out/: `npm run build:static` first (see README → Run Tests).
 // E2E_PORT lets several checkouts run the suite side by side.
 const PORT = Number(process.env.E2E_PORT ?? 4174);
