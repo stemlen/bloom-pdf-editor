@@ -100,6 +100,32 @@ test("reorder pages by dragging thumbnails", async ({ page }) => {
   expect(text.indexOf("Appendix")).toBeLessThan(text.indexOf("Quarterly Garden Report"));
 });
 
+test("undo after deleting a page restores the right pages", async ({ page }) => {
+  const errors = trackErrors(page);
+  await openInEditor(page);
+  // Replace All touches pages 1 and 3 ("page layout", "third page", "page tools").
+  await page.keyboard.press("ControlOrMeta+f");
+  await page.getByPlaceholder("Search text in PDF…").fill("page");
+  await page.getByPlaceholder("Replace with…").fill("leaf");
+  await page.getByRole("button", { name: "Replace All" }).click();
+  await expect(page.getByTestId("match-count")).toHaveText("No matches");
+
+  const thumbs = page.getByTestId("page-thumb");
+  await thumbs.nth(0).hover();
+  await thumbs.nth(0).getByRole("button", { name: "Delete page" }).click();
+  await page.getByTestId("confirm-dialog").getByRole("button", { name: "Delete page" }).click();
+  await expect(thumbs).toHaveCount(2);
+
+  // Undo the Replace All: only the old page 3 (now page 2) has something to restore.
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByTestId("page-indicator")).toHaveText("2 / 2");
+  const text = await pdfText((await downloadPdf(page)).bytes);
+  expect(text).toContain("1,200.50"); // Sales, untouched
+  expect(text).toContain("third page gives page tools");
+  expect(text).not.toContain("Quarterly Garden Report"); // deleted, must not come back over Sales
+  expect(errors).toEqual([]);
+});
+
 test("close clears the document and returns home", async ({ page }) => {
   await openInEditor(page);
   await page.getByRole("button", { name: "Close file & return home" }).click();

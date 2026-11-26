@@ -5296,7 +5296,16 @@ export default function EditorPage() {
   }, [router]);
 
   // ── Page Operations ──
-  const refreshAfterPageOp = useCallback((nextDoc: PDFDocumentData, nextCurrentPage?: number) => {
+  const refreshAfterPageOp = useCallback((
+    nextDoc: PDFDocumentData,
+    nextCurrentPage?: number,
+    pageChange?: Parameters<EditorHistory['applyPageChange']>[0],
+  ) => {
+    // Undo entries are keyed by page index: renumber them with the pages.
+    if (pageChange) {
+      historyRef.current.applyPageChange(pageChange);
+      syncTxState();
+    }
     setDoc({ ...nextDoc });
     setTotalPages(nextDoc.pages.length);
     if (nextCurrentPage != null) {
@@ -5307,7 +5316,7 @@ export default function EditorPage() {
     setIsDirty(true);
     setRenderKey((k) => k + 1);
     setThumbnailKey((k) => k + 1);
-  }, [currentPage]);
+  }, [currentPage, syncTxState]);
 
   const downloadPdfBytes = useCallback((bytes: Uint8Array, name: string) => {
     const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
@@ -5329,7 +5338,7 @@ export default function EditorPage() {
       } else if (currentPage > index) {
         nextPage = currentPage - 1;
       }
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'delete', index });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t delete the page', e));
     }
@@ -5357,7 +5366,7 @@ export default function EditorPage() {
       } else if (currentPage >= toIndex && currentPage < fromIndex) {
         nextPage = currentPage + 1;
       }
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'move', from: fromIndex, to: toIndex });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t reorder the pages', e));
     }
@@ -5601,7 +5610,7 @@ export default function EditorPage() {
     try {
       engineRef.current.insertBlankPage(doc, index);
       const nextPage = currentPage >= index ? currentPage + 1 : currentPage;
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: 1 });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t insert a blank page', e));
     }
@@ -5614,7 +5623,7 @@ export default function EditorPage() {
       const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, index);
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: sourceDoc.pages.length });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t insert the PDF', e));
     }
