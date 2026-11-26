@@ -2699,14 +2699,6 @@ export default function EditorPage() {
     }
   }, [doc, currentPage, formFields, pushEditorHistory]);
 
-  /**
-   * Set when Shift+Enter is pressed mid-edit: the edit is committed first, and
-   * the duplicate is made from the re-extracted line once the page re-renders.
-   * The anchor's instruction indices point at the pre-edit content, so
-   * duplicating it directly copied the original text over the edited line.
-   */
-  const pendingDuplicateRef = useRef<{ baseline: number; x: number } | null>(null);
-
   const duplicateLine = useCallback(async (line: TextLine) => {
     if (!doc || !engineRef.current) return;
     try {
@@ -2731,23 +2723,25 @@ export default function EditorPage() {
     const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
     if (!doc || !engineRef.current || !line) return;
     if (editingLine) {
-      pendingDuplicateRef.current = { baseline: line.baseline, x: line.x };
-      await handleEditSubmit(false);
+      // Commit (and close) the edit first, then duplicate the line as it is
+      // in the committed content: the anchor's instruction indices point at
+      // the pre-edit stream, so copying it directly put the original text
+      // over the edited line. Waiting for a re-render instead never fired
+      // when the edit was left open or nothing had changed.
+      const anchor = { baseline: line.baseline, x: line.x };
+      await handleEditSubmit(true);
+      const engine = engineRef.current;
+      const page = doc.pages[currentPage];
+      const bytes = engine.getPageContentBytes(page, doc.objects);
+      const lines = engine.buildDocumentFlow(engine.interpretPage(bytes, page, doc.objects).textRuns).lines;
+      const fresh = lines.find((l: TextLine) =>
+        Math.abs(l.baseline - anchor.baseline) < 2 && Math.abs(l.x - anchor.x) < 4,
+      );
+      if (fresh) await duplicateLine(fresh);
       return;
     }
     await duplicateLine(line);
-  }, [doc, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
-
-  // Finish a Shift+Enter duplicate once the committed edit has re-rendered.
-  useEffect(() => {
-    const pending = pendingDuplicateRef.current;
-    if (!pending || !renderResult || editingLine) return;
-    pendingDuplicateRef.current = null;
-    const fresh = renderResult.textLines.find(l =>
-      Math.abs(l.baseline - pending.baseline) < 2 && Math.abs(l.x - pending.x) < 4,
-    );
-    if (fresh) void duplicateLine(fresh);
-  }, [renderResult, editingLine, duplicateLine]);
+  }, [doc, currentPage, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
 
   // Resolve table cell for the current selection (for sidebar actions)
   const selectedTableCell = (() => {

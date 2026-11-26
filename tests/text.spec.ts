@@ -91,6 +91,22 @@ test("duplicate a line below", async ({ page }) => {
   expect(text.match(/hello@bloompdf\.app/g)?.length).toBe(2);
 });
 
+test("Shift+Enter while editing commits the edit, then duplicates the edited line", async ({ page }) => {
+  await openInEditor(page);
+  const at = await pdfPoint(page, CONTACT.x, CONTACT.y);
+  await page.mouse.click(at.x, at.y);
+  await expect(page.getByLabel("Edit line")).toBeFocused();
+  await page.keyboard.press("ControlOrMeta+a");
+  await page.keyboard.type("Contact: row@bloompdf.app");
+  await page.keyboard.press("Shift+Enter");
+  await expect(page.getByLabel("Edit line")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Undo" })).toBeEnabled();
+  const { bytes } = await downloadPdf(page);
+  const text = await pdfText(bytes);
+  expect(text.match(/row@bloompdf\.app/g)?.length).toBe(2);
+  expect(text).not.toContain("hello@bloompdf.app");
+});
+
 test("add a row to a detected table", async ({ page }) => {
   await openInEditor(page);
   await page.getByRole("button", { name: "Next page" }).click();
@@ -106,13 +122,13 @@ test("add a row to a detected table", async ({ page }) => {
 
 test("links: add a link to a line, then scan and find it", async ({ page }) => {
   await openInEditor(page);
-  const messages: string[] = [];
-  page.on("dialog", (d) => messages.push(d.message()));
+  // An empty scan no longer pops an alert (a64e13e); the button says so instead.
   await page.getByRole("button", { name: "Scan for Links" }).click();
-  await expect.poll(() => messages).toContain("No links found on this page.");
+  await expect(page.getByRole("button", { name: "No Links on This Page" })).toBeVisible();
 
   const at = await pdfPoint(page, CONTACT.x, CONTACT.y);
   await page.mouse.click(at.x, at.y);
+  await expect(page.getByLabel("Edit line")).toBeFocused();
   await page.keyboard.press("ControlOrMeta+a");
   await page.getByRole("button", { name: "Add Link to Selection" }).click();
   const url = page.getByPlaceholder("https://example.com");
