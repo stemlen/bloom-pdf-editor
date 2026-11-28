@@ -1,5 +1,8 @@
 import type { Metadata, Viewport } from "next";
-import { Caveat, Inter } from "next/font/google";
+// Fonts are self-hosted from npm so the build never fetches from Google Fonts
+// (Turbopack fails on some Google font URLs, which broke Cloudflare builds).
+import "@fontsource-variable/inter";
+import "@fontsource-variable/caveat";
 import "./globals.css";
 import { ThemeProvider, themeInitScript } from "./theme/ThemeProvider";
 
@@ -29,16 +32,13 @@ export const viewport: Viewport = {
   ],
 };
 
-const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
-const caveat = Caveat({ subsets: ["latin"], variable: "--font-hand", weight: ["500", "700"], display: "swap" });
-
 export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en" suppressHydrationWarning className={`${inter.variable} ${caveat.variable}`}>
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeInitScript }} />
       </head>

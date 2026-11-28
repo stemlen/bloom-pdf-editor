@@ -4,6 +4,10 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 :root {
+  /* Self-hosted font families (see layout.tsx). */
+  --font-inter: "Inter Variable";
+  --font-hand: "Caveat Variable";
+
   /* ── BloomPDF Core Palette ────────────────────────────── */
   --bloom-50:  #FFF0F3;
   --bloom-100: #FFE0E8;
