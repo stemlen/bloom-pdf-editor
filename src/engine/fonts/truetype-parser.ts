@@ -669,57 +669,35 @@ function parseSimpleGlyph(r: BinaryReader, numberOfContours: number): GlyphComma
 
   for (let c = 0; c < numberOfContours; c++) {
     const contourEnd = endPtsOfContours[c];
-    let firstOnCurve = -1;
-
-    // Find first on-curve point
-    for (let i = contourStart; i <= contourEnd; i++) {
-      if (flags[i] & 0x01) {
-        firstOnCurve = i;
-        break;
-      }
+    const n = contourEnd - contourStart + 1;
+    if (n <= 0) {
+      contourStart = contourEnd + 1;
+      continue;
     }
+    const px = (k: number) => xCoords[contourStart + k];
+    const py = (k: number) => yCoords[contourStart + k];
+    const on = (k: number) => !!(flags[contourStart + k] & 0x01);
 
-    if (firstOnCurve === -1) {
-      // All off-curve — synthesize on-curve from midpoints
-      const mid_x = (xCoords[contourStart] + xCoords[contourEnd]) / 2;
-      const mid_y = (yCoords[contourStart] + yCoords[contourEnd]) / 2;
-      commands.push({ type: 'M', args: [mid_x, mid_y] });
+    // Visit every point exactly once, starting after point n-1 (the standard
+    // TrueType walk). Consecutive off-curve points imply an on-curve midpoint.
+    if (on(n - 1)) {
+      commands.push({ type: 'M', args: [px(n - 1), py(n - 1)] });
+    } else if (on(0)) {
+      commands.push({ type: 'M', args: [px(0), py(0)] });
     } else {
-      commands.push({ type: 'M', args: [xCoords[firstOnCurve], yCoords[firstOnCurve]] });
+      commands.push({ type: 'M', args: [(px(n - 1) + px(0)) / 2, (py(n - 1) + py(0)) / 2] });
     }
-
-    // Walk the contour
-    const numContourPoints = contourEnd - contourStart + 1;
-    let idx = firstOnCurve >= 0 ? firstOnCurve - contourStart + 1 : 1;
-
-    for (let step = 0; step < numContourPoints; step++) {
-      const i = contourStart + (idx % numContourPoints);
-      const onCurve = !!(flags[i] & 0x01);
-
-      if (onCurve) {
-        commands.push({ type: 'L', args: [xCoords[i], yCoords[i]] });
-      } else {
-        // Off-curve: quadratic bezier
-        const nextIdx = contourStart + ((idx + 1) % numContourPoints);
-        const nextOnCurve = !!(flags[nextIdx] & 0x01);
-
-        if (nextOnCurve) {
-          commands.push({
-            type: 'Q',
-            args: [xCoords[i], yCoords[i], xCoords[nextIdx], yCoords[nextIdx]],
-          });
-          idx++; // Skip the next on-curve point
-        } else {
-          // Two consecutive off-curve points — implicit on-curve midpoint
-          const midX = (xCoords[i] + xCoords[nextIdx]) / 2;
-          const midY = (yCoords[i] + yCoords[nextIdx]) / 2;
-          commands.push({
-            type: 'Q',
-            args: [xCoords[i], yCoords[i], midX, midY],
-          });
-        }
+    for (let k = 0; k < n; k++) {
+      if (on(k)) {
+        if (k === 0 && !on(n - 1)) continue; // already the start point
+        commands.push({ type: 'L', args: [px(k), py(k)] });
+        continue;
       }
-      idx++;
+      const nx = (k + 1) % n;
+      const endX = on(nx) ? px(nx) : (px(k) + px(nx)) / 2;
+      const endY = on(nx) ? py(nx) : (py(k) + py(nx)) / 2;
+      commands.push({ type: 'Q', args: [px(k), py(k), endX, endY] });
+      if (on(nx) && nx !== 0) k++; // that on-curve point is the end of this curve
     }
 
     commands.push({ type: 'Z', args: [] });

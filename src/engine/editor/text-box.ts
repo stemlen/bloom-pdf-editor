@@ -12,6 +12,7 @@ import { PDFDict, PDFName, PDFString, type PDFObject, type PDFPageInfo, PDFRef }
 import { resolveRef } from '../parser/parser';
 import { getStandardFont } from '../fonts/standard14';
 import { serializeToString } from './stream-compiler';
+import { appendIsolatedContent } from '../content/append-isolation';
 
 export type TextBoxAlign = 'left' | 'center' | 'right' | 'justify';
 export type TextBoxList = 'none' | 'bullet' | 'numbered';
@@ -119,6 +120,22 @@ export function encodeWinAnsi(text: string): string {
     else out += '?';
   }
   return out;
+}
+
+/**
+ * Distinct characters of `text` that no Standard 14 font can show (Devanagari
+ * and other non-Latin scripts, emoji, …). Text boxes, and line edits that
+ * fall back to Helvetica, write these as '?'. Control characters (line
+ * breaks, unmapped-glyph NULs) are ignored.
+ */
+export function unsupportedStandardFontChars(text: string): string[] {
+  const out = new Set<string>();
+  for (const ch of text) {
+    const cp = ch.codePointAt(0)!;
+    if (cp < 0x20 || ch === '?') continue;
+    if (encodeWinAnsi(ch) === '?') out.add(ch);
+  }
+  return [...out];
 }
 
 /** Advance width of one WinAnsi byte in 1/1000 em. */
@@ -413,8 +430,7 @@ export function insertTextBox(
   const resource = ensureFaceResource(page, objects, layout.face);
   // Strings are written with octal escapes, so the operators are pure ASCII.
   const raw = new TextEncoder().encode(buildTextBoxOperators(layout, style, left, top, resource));
-  const merged = new Uint8Array(contentBytes.length + raw.length);
-  merged.set(contentBytes);
-  merged.set(raw, contentBytes.length);
-  return merged;
+  // The box is positioned in default user space, so it must not inherit a
+  // CTM or clip the page's own content leaves behind.
+  return appendIsolatedContent(contentBytes, raw);
 }

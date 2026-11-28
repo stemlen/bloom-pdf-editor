@@ -3,21 +3,23 @@
  */
 
 import { getPageContentBytes, resolveRef } from '../parser/parser';
-import { updatePageContent, concatBytes } from '../editor/stream-compiler';
+import { updatePageContent, concatBytes, isolateGraphicsState } from '../editor/stream-compiler';
 import {
   PDFArray,
-  PDFBoolean,
   PDFDict,
   PDFHexString,
   PDFName,
   PDFNumber,
   PDFObject,
   PDFRef,
+  PDFStream,
   PDFString,
   type PDFDocumentData,
 } from '../types';
 import type { AcroFormWidget } from './types';
+import { DEFAULT_FLATTEN_OPTIONS } from './types';
 import { flattenWidgets } from './flatten-field';
+import { getNextObjNum } from '../writer/serializer';
 import { onStateName } from './detect-fields';
 import { regenerateTextAppearance } from './text-appearance';
 
@@ -121,11 +123,20 @@ export function setFormFieldValue(
     dict.set('AS', new PDFName(value ? onName : 'Off'));
   } else {
     field.set('V', encodeTextString(value));
-    regenerateTextAppearance(doc, widget, value);
-    // The widget's stored appearance still shows the old text; ask viewers to rebuild it.
-    let acro = doc.catalog.get('AcroForm');
-    if (acro instanceof PDFRef) acro = resolveRef(acro, doc.objects);
-    if (acro instanceof PDFDict) acro.set('NeedAppearances', new PDFBoolean(true));
+    if (widget.fieldType === 'Ch') {
+      // /I (selected option indices) wins over /V in some viewers; keep it in step.
+      const index = widget.options.indexOf(value);
+      if (index >= 0) field.set('I', new PDFArray([new PDFNumber(index)]));
+      else field.delete('I');
+    }
+    const rasterized = regenerateTextAppearance(doc, widget, value);
+    if (rasterized) {
+      // The new appearance draws text Helvetica can't encode. Viewers that
+      // honour NeedAppearances would rebuild it from /DA and show mojibake.
+      let acro = doc.catalog.get('AcroForm');
+      if (acro instanceof PDFRef) acro = resolveRef(acro, doc.objects);
+      if (acro instanceof PDFDict) acro.delete('NeedAppearances');
+    }
   }
   if (field !== dict) dict.delete('V');
   widget.value = value;
@@ -158,6 +169,103 @@ export function removeWidgetAnnots(
   }
 }
 
+const fmtNum = (n: number) => (Math.abs(n) < 1e-9 ? '0' : Number(n.toFixed(4)).toString());
+
+/** Annotation flags Hidden (2) or NoView (6): the widget never shows. */
+function isHiddenWidget(dict: PDFDict): boolean {
+  const f = dict.get('F');
+  return f instanceof PDFNumber && (f.value & ((1 << 1) | (1 << 5))) !== 0;
+}
+
+/**
+ * The widget's normal appearance stream for its current /AS state, as an
+ * indirect reference (a direct stream is moved into its own object).
+ */
+function normalAppearanceRef(dict: PDFDict, objects: Map<string, PDFObject>): PDFRef | null {
+  const ap = resolveRef(dict.get('AP') as PDFObject, objects);
+  if (!(ap instanceof PDFDict)) return null;
+  let n: PDFObject | undefined = ap.get('N');
+  const resolvedN = resolveRef(n as PDFObject, objects);
+  if (resolvedN instanceof PDFDict) {
+    // On/off states: pick the one /AS names.
+    const as = dict.get('AS');
+    if (!(as instanceof PDFName)) return null;
+    n = resolvedN.get(as.name);
+  }
+  if (n instanceof PDFRef) return objects.get(n.toKey()) instanceof PDFStream ? n : null;
+  if (n instanceof PDFStream) {
+    const ref = new PDFRef(getNextObjNum({ objects } as PDFDocumentData), 0);
+    objects.set(ref.toKey(), n);
+    return ref;
+  }
+  return null;
+}
+
+/**
+ * Matrix that maps a form XObject's (Matrix-transformed) BBox onto the widget
+ * rectangle — ISO 32000-2 §12.5.5, Algorithm "appearance streams".
+ */
+function appearanceToRectMatrix(dict: PDFDict, rect: { x: number; y: number; width: number; height: number }): number[] {
+  const nums = (key: string, n: number): number[] | null => {
+    const v = dict.get(key);
+    if (!(v instanceof PDFArray) || v.length < n) return null;
+    const out = v.items.slice(0, n).map((x) => (x instanceof PDFNumber ? x.value : NaN));
+    return out.some((x) => !Number.isFinite(x)) ? null : out;
+  };
+  const [bx0, by0, bx1, by1] = nums('BBox', 4) ?? [0, 0, rect.width, rect.height];
+  const [a, b, c, d, e, f] = nums('Matrix', 6) ?? [1, 0, 0, 1, 0, 0];
+  const pts = [[bx0, by0], [bx1, by0], [bx0, by1], [bx1, by1]].map(([x, y]) => [a * x + c * y + e, b * x + d * y + f]);
+  const minX = Math.min(...pts.map((p) => p[0]));
+  const minY = Math.min(...pts.map((p) => p[1]));
+  const w = Math.max(...pts.map((p) => p[0])) - minX;
+  const h = Math.max(...pts.map((p) => p[1])) - minY;
+  const sx = w > 0 ? rect.width / w : 1;
+  const sy = h > 0 ? rect.height / h : 1;
+  return [sx, 0, 0, sy, rect.x - minX * sx, rect.y - minY * sy];
+}
+
+/** The page's own /Resources dictionary (copied down from an inherited one). */
+function pageResources(page: PDFDocumentData['pages'][0], objects: Map<string, PDFObject>): PDFDict {
+  let res = resolveRef(page.dict.get('Resources') as PDFObject, objects);
+  if (!(res instanceof PDFDict)) {
+    res = new PDFDict();
+    if (page.resources instanceof PDFDict) {
+      for (const [k, v] of page.resources.entries()) (res as PDFDict).set(k, v);
+    }
+    page.dict.set('Resources', res);
+  }
+  page.resources = res as PDFDict;
+  return res as PDFDict;
+}
+
+function resourceSubDict(res: PDFDict, key: string, objects: Map<string, PDFObject>): PDFDict {
+  let sub = resolveRef(res.get(key) as PDFObject, objects);
+  if (!(sub instanceof PDFDict)) {
+    sub = new PDFDict();
+    res.set(key, sub);
+  }
+  return sub as PDFDict;
+}
+
+function addPageXObject(page: PDFDocumentData['pages'][0], objects: Map<string, PDFObject>, ref: PDFRef): string {
+  const xobjects = resourceSubDict(pageResources(page, objects), 'XObject', objects);
+  let i = 1;
+  while (xobjects.has(`FlatAP${i}`)) i++;
+  xobjects.set(`FlatAP${i}`, ref);
+  return `FlatAP${i}`;
+}
+
+function ensurePageFont(page: PDFDocumentData['pages'][0], objects: Map<string, PDFObject>, name: string): void {
+  const fonts = resourceSubDict(pageResources(page, objects), 'Font', objects);
+  if (fonts.has(name)) return;
+  const font = new PDFDict();
+  font.set('Type', new PDFName('Font'));
+  font.set('Subtype', new PDFName('Type1'));
+  font.set('BaseFont', new PDFName('Helvetica'));
+  font.set('Encoding', new PDFName('WinAnsiEncoding'));
+  fonts.set(name, font);
+}
+
 /**
  * Flatten widgets on a page: bake appearances into content stream,
  * remove widget annotations.
@@ -170,9 +278,32 @@ export async function flattenFormFieldsOnPage(
   if (widgets.length === 0) return;
 
   const page = doc.pages[pageIndex];
-  const { content, removedRefs } = flattenWidgets(widgets);
+  // Bake each widget's own normal appearance (what every viewer shows) into
+  // the page. Only widgets without one get a synthesized appearance.
+  const parts: string[] = [];
+  const synthesized: AcroFormWidget[] = [];
+  const removedRefs: PDFRef[] = [];
+  for (const widget of widgets) {
+    removedRefs.push(widget.ref);
+    if (isHiddenWidget(widget.dict)) continue;
+    const ap = normalAppearanceRef(widget.dict, doc.objects);
+    if (!ap) {
+      synthesized.push(widget);
+      continue;
+    }
+    const stream = doc.objects.get(ap.toKey()) as PDFStream;
+    stream.dict.set('Type', new PDFName('XObject'));
+    stream.dict.set('Subtype', new PDFName('Form'));
+    const name = addPageXObject(page, doc.objects, ap);
+    const m = appearanceToRectMatrix(stream.dict, widget.rect);
+    parts.push(`q ${m.map(fmtNum).join(' ')} cm /${name} Do Q`);
+  }
+  if (synthesized.length > 0) {
+    ensurePageFont(page, doc.objects, DEFAULT_FLATTEN_OPTIONS.fontResourceName);
+    parts.push(flattenWidgets(synthesized).content);
+  }
   const existing = getPageContentBytes(page, doc.objects);
-  const merged = concatBytes(existing, stringToBytes(`\n${content}`));
+  const merged = concatBytes(isolateGraphicsState(existing), stringToBytes(`\n${parts.join('\n')}\n`));
   await updatePageContent(page.contentRefs, merged, doc.objects);
   removeWidgetAnnots(page.dict, removedRefs, doc.objects);
   removeFieldsForWidgets(doc, removedRefs);

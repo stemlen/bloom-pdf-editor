@@ -112,7 +112,7 @@ export interface FlattenFieldOptions {
 
 export const DEFAULT_FLATTEN_OPTIONS: FlattenFieldOptions = {
   drawBorder: true,
-  fontResourceName: 'ZaDb',
+  fontResourceName: 'Helv',
   fontSize: 12,
   textColor: [0, 0, 0],
 };

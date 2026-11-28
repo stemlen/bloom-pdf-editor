@@ -1,18 +1,13 @@
 /**
- * Encrypt document objects and build /Encrypt dictionary (Phase 4).
+ * Build the /Encrypt dictionary and file key for a document (Phase 4).
  */
 
 import {
-  PDFArray,
   PDFBoolean,
   PDFDict,
-  PDFHexString,
   PDFName,
   PDFNumber,
-  PDFObject,
   PDFRef,
-  PDFStream,
-  PDFString,
   type PDFDocumentData,
 } from '../../types';
 import { getNextObjNum } from '../../writer/serializer';
@@ -34,20 +29,12 @@ import {
   ensureFileId,
   parseEncryptDict,
 } from './encrypt-dict';
-import {
-  computeObjectKey,
-  encryptBytes,
-  shouldEncryptStream,
-  shouldEncryptString,
-} from './object-cipher';
 import { stringToPdfBytes } from '../crypto/bytes';
 
-function asPdfStringBytes(obj: PDFString | PDFHexString): Uint8Array {
-  return obj.toBytes();
-}
-
 /**
- * Encrypt all strings/streams in place and attach Encrypt dict to trailer.
+ * Protect a document: build the /Encrypt dictionary, attach it to the trailer
+ * and store the file key on the document. Strings and streams are encrypted
+ * when the document is written (see write-encryption.ts).
  */
 export async function encryptDocumentObjects(
   doc: PDFDocumentData,
@@ -100,19 +87,9 @@ export async function encryptDocumentObjects(
     algorithm: detectAlgorithm(parsed),
   };
 
-  // Encrypt all objects
-  for (const [key, obj] of doc.objects.entries()) {
-    if (key === encryptRef.toKey()) continue;
-    const parts = key.split('_');
-    const on = parseInt(parts[0], 10);
-    const gn = parseInt(parts[1], 10);
-
-    if (obj instanceof PDFStream) {
-      await encryptStream(obj, on, gn, ctx);
-    } else if (shouldEncryptString(parsed)) {
-      await encryptObjectValue(obj, on, gn, ctx, new Set());
-    }
-  }
+  // Objects stay plaintext in memory (so the document can still be rendered and
+  // edited); the writer encrypts them with this key on save.
+  doc.encryptionKey = fileKey;
 
   // Bump version for AES
   if (algorithm === 'AES-256' && parseFloat(doc.version) < 1.7) {
@@ -181,67 +158,6 @@ function buildEncryptDictR2R4(
   }
 
   return d;
-}
-
-async function encryptStream(
-  stream: PDFStream,
-  objNum: number,
-  genNum: number,
-  ctx: EncryptionContext,
-): Promise<void> {
-  const type = stream.dict.getName('Type');
-  const subtype = stream.dict.getName('Subtype');
-  if (!shouldEncryptStream(ctx.encrypt, { type, subtype })) return;
-
-  // Encrypt the stored bytes (prefer raw/compressed form)
-  const source = stream.rawBytes;
-  const key = computeObjectKey(ctx.fileKey!, objNum, genNum, ctx.algorithm);
-  const cipher = await encryptBytes(source, key, ctx.algorithm);
-  stream.rawBytes = cipher;
-  stream.decodedBytes = null;
-  stream.dict.set('Length', new PDFNumber(cipher.length));
-}
-
-async function encryptObjectValue(
-  obj: PDFObject,
-  objNum: number,
-  genNum: number,
-  ctx: EncryptionContext,
-  seen: Set<PDFObject>,
-): Promise<void> {
-  if (seen.has(obj)) return;
-  seen.add(obj);
-
-  if (obj instanceof PDFString || obj instanceof PDFHexString) {
-    // Mutate by replacing is hard for immutable wrappers — callers replace dict entries
-    return;
-  }
-
-  if (obj instanceof PDFDict) {
-    for (const [k, v] of [...obj.entries()]) {
-      if (v instanceof PDFString || v instanceof PDFHexString) {
-        const key = computeObjectKey(ctx.fileKey!, objNum, genNum, ctx.algorithm);
-        const cipher = await encryptBytes(asPdfStringBytes(v), key, ctx.algorithm);
-        obj.set(k, bytesToPdfHex(cipher));
-      } else if (v instanceof PDFDict || v instanceof PDFArray) {
-        await encryptObjectValue(v, objNum, genNum, ctx, seen);
-      }
-    }
-    return;
-  }
-
-  if (obj instanceof PDFArray) {
-    for (let i = 0; i < obj.items.length; i++) {
-      const v = obj.items[i];
-      if (v instanceof PDFString || v instanceof PDFHexString) {
-        const key = computeObjectKey(ctx.fileKey!, objNum, genNum, ctx.algorithm);
-        const cipher = await encryptBytes(asPdfStringBytes(v), key, ctx.algorithm);
-        obj.items[i] = bytesToPdfHex(cipher);
-      } else if (v instanceof PDFDict || v instanceof PDFArray) {
-        await encryptObjectValue(v, objNum, genNum, ctx, seen);
-      }
-    }
-  }
 }
 
 /** Serialize EncryptDictionary back to PDFDict (permission updates etc.). */

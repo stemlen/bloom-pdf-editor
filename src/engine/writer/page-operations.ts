@@ -42,14 +42,6 @@ export function deletePage(doc: PDFDocumentData, pageIndex: number): void {
     throw new Error('Cannot delete the last page');
   }
 
-  const page = doc.pages[pageIndex];
-
-  // Remove from parent's Kids array
-  removePageFromTree(page.ref, doc.catalog, doc.objects);
-
-  // Update page count
-  updatePageCount(doc.catalog, doc.objects, -1);
-
   // Remove from our pages array
   doc.pages.splice(pageIndex, 1);
 
@@ -57,6 +49,10 @@ export function deletePage(doc: PDFDocumentData, pageIndex: number): void {
   for (let i = pageIndex; i < doc.pages.length; i++) {
     doc.pages[i].index = i;
   }
+
+  // Rebuild the tree from doc.pages. Filtering only the root's /Kids missed pages that
+  // sit under an intermediate /Pages node, so they stayed in the saved file.
+  rebuildKidsArray(doc);
 }
 
 /**
@@ -495,29 +491,16 @@ export function extractPages(
 
 // ─── Page tree helpers ──────────────────────────────────────────────────────
 
-function removePageFromTree(
-  pageRef: PDFRef,
-  catalog: PDFDict,
-  objects: Map<string, PDFObject>,
-): void {
-  const pagesRef = catalog.getRef('Pages');
-  if (!pagesRef) return;
+/** Attributes a page may inherit from its ancestors in the page tree (ISO 32000-1, 7.7.3.4). */
+const INHERITABLE_PAGE_KEYS = ['Resources', 'MediaBox', 'CropBox', 'Rotate'] as const;
 
-  const pagesObj = resolveRef(pagesRef, objects);
-  if (!(pagesObj instanceof PDFDict)) return;
-
-  const kids = pagesObj.get('Kids');
-  if (!(kids instanceof PDFArray)) return;
-
-  // Filter out the page ref
-  const newItems = kids.items.filter((item) => {
-    if (item instanceof PDFRef) return !item.equals(pageRef);
-    return true;
-  });
-
-  pagesObj.set('Kids', new PDFArray(newItems));
-}
-
+/**
+ * Rewrites the page tree as a single flat /Kids array in `doc.pages` order.
+ *
+ * A page that used to sit under an intermediate /Pages node is re-parented to the root, so
+ * the attributes it inherited from that node are copied onto the page first; otherwise it
+ * would silently lose its rotation, size or fonts once the old node is unreachable.
+ */
 function rebuildKidsArray(doc: PDFDocumentData): void {
   const pagesRef = doc.catalog.getRef('Pages');
   if (!pagesRef) return;
@@ -525,22 +508,27 @@ function rebuildKidsArray(doc: PDFDocumentData): void {
   const pagesObj = resolveRef(pagesRef, doc.objects);
   if (!(pagesObj instanceof PDFDict)) return;
 
+  for (const page of doc.pages) {
+    const parent = page.dict.get('Parent');
+    if (parent instanceof PDFRef && parent.equals(pagesRef)) continue;
+    materializeInheritedAttributes(page, doc.objects);
+    page.dict.set('Parent', pagesRef);
+  }
+
   const newKids = new PDFArray(doc.pages.map((p) => p.ref));
   pagesObj.set('Kids', newKids);
   pagesObj.set('Count', new PDFNumber(doc.pages.length));
 }
 
-function updatePageCount(
-  catalog: PDFDict,
-  objects: Map<string, PDFObject>,
-  delta: number,
-): void {
-  const pagesRef = catalog.getRef('Pages');
-  if (!pagesRef) return;
-
-  const pagesObj = resolveRef(pagesRef, objects);
-  if (!(pagesObj instanceof PDFDict)) return;
-
-  const count = pagesObj.getNumber('Count') ?? 0;
-  pagesObj.set('Count', new PDFNumber(count + delta));
+function materializeInheritedAttributes(page: PDFPageInfo, objects: Map<string, PDFObject>): void {
+  const seen = new Set<PDFDict>();
+  let node: PDFObject | undefined = resolveRef(page.dict.get('Parent') ?? new PDFRef(0, 0), objects);
+  while (node instanceof PDFDict && !seen.has(node)) {
+    seen.add(node);
+    for (const key of INHERITABLE_PAGE_KEYS) {
+      if (!page.dict.has(key) && node.has(key)) page.dict.set(key, node.get(key)!);
+    }
+    const up = node.get('Parent');
+    node = up ? resolveRef(up, objects) : undefined;
+  }
 }

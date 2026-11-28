@@ -6,6 +6,7 @@ import type { PDFDocumentData, PDFObject } from '../types';
 import { serializeDocument } from './serializer';
 import { saveIncremental } from './incremental-writer';
 import { garbageCollect, rootsFromTrailer, deduplicateStreams, applyRefMap } from '../optimize';
+import { needsWriteEncryption } from '../security/encryption/write-encryption';
 
 /**
  * Quick save: append only changed objects when possible.
@@ -15,7 +16,9 @@ export async function saveQuick(
   modifiedKeys?: Set<string>,
   newObjects?: Map<string, PDFObject>,
 ): Promise<Uint8Array> {
-  if (!doc.rawBytes || doc.rawBytes.length === 0) {
+  // Encrypted documents are written in full: the original bytes may be
+  // unencrypted or use another key, so an appended update could not be read.
+  if (!doc.rawBytes || doc.rawBytes.length === 0 || needsWriteEncryption(doc)) {
     return serializeDocument(doc);
   }
 

@@ -54,13 +54,20 @@ export class LayoutEngine implements ILayoutEngine {
     const { normalized, characters, images, vectors, annotations, forms } =
       normalizer.normalize(page);
 
+    // A page-sized rectangle (a white background, as Chrome paints, or a page
+    // frame) is not content. As a block it would pull every text block into
+    // one page-sized region, losing their positions.
+    const content = vectors.filter(
+      (v) => !(v.bbox.width >= normalized.width * 0.9 && v.bbox.height >= normalized.height * 0.9),
+    );
+
     // 2. Spatial index + 3. Clustering
     const index = createSpatialIndex();
     const { clusters, blocks } = clusterer.cluster({
       pageIndex: page.index,
       characters,
       images,
-      vectors,
+      vectors: content,
       annotations,
       forms,
       index,

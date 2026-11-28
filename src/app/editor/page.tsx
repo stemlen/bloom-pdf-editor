@@ -22,14 +22,18 @@ import type { PDFDocumentData, PDFObject, PDFPageInfo, RenderResult, TextRun, Te
 import type { EditorTool, ToolDef, PathType, DrawnPath, FloatingText, FloatingImage, DrawMode, RemovedImageRecord } from './types';
 import { TOOLS } from './types';
 import {
-  canvasToPdf, pdfToCanvas, hexToRGB,
+  canvasToPdf, displayBoxToPage, pdfToCanvas, pdfBoxToCanvasRect, hexToRGB,
   hitTestTextLine, findNearestTextLine, caretIndexFromLineX,
   getLineBounds, getOverlayFontFamily, getOverlayFontStyle, getDisplayFontFamily,
   extractImageItemDataUrl,
 } from './utils';
-import { PDFRef, getPageContentBytes, interpretPage, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
+import { PDFRef, getPageContentBytes, interpretPage, findTextMatches, textMatchBounds, buildDisplayListIndex, hitTestDisplayList, isSelectableDisplayItem, EditorHistory, captureHistoryEntry, restoreAnnotSnapshot, parseOverlaySnapshot, deleteObject, visualFontSize, resolveRunStyleFlags, transformObject, applyObjectTransform, distributeTextChangeToSegments, segmentAtIndex, createVisualSignature, hitTestSignature, moveSignature, resizeSignature, rotateSignature, setSignatureOpacity, setSignatureLocked, deleteSignature, updateSignature, getSignatureLibrary, DEFAULT_SIGNATURE_SIZE, detectSignatureFieldsOnPage, hitTestSignatureField, createSignatureFieldAtPoint, applySignatureFieldAppearanceAsync, getCertificateManager, signDocumentCryptographic, validateDocumentSignatures, enableLongTermValidation, getLtvStatus, listManagedSignatures, buildRevisionViewer, lockSignaturesAfterSigning, pushRecentSignatureId, orderLibraryByRecent, SIGNATURE_SHORTCUTS } from '@/engine';
 import type { QuadTree, SelectableItem, EditableObject } from '@/engine';
-import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+import { DEFAULT_TEXT_BOX_STYLE, insertTextBox, layoutTextBox, resolveTextBoxStyle, textBoxCssFamily, unsupportedStandardFontChars, type TextBoxAlign, type TextBoxList, type TextBoxStyle } from '@/engine/editor/text-box';
+
+/** Warning for typed characters the PDF can't carry (written as '?'). */
+const unsupportedCharsWarning = (chars: string[]) =>
+  `Some characters you typed (${chars.slice(0, 6).join(' ')}${chars.length > 6 ? ' …' : ''}) aren't in this PDF's fonts, and fonts for scripts like Hindi can't be embedded yet, so they'll appear as "?" in the downloaded file.`;
 import { TextBoxPreview } from './components/TextBoxPreview';
 import { findMatchingFlowLine } from './flowLineMatch';
 import { getPdfBackend } from '@/workers/pdf/client';
@@ -46,12 +50,15 @@ import { CertificateImportDialog } from './components/signatures/CertificateImpo
 import { WatermarkPreview } from './components/WatermarkPreview';
 import { hitTestDrawnPath, drawnPathBounds } from './drawingHitTest';
 import { watermarkFitScale, watermarkNaturalSize } from '@/lib/watermarkFit';
+import { rasterizeTextLine } from '@/lib/complexTextRaster';
+import pako from 'pako';
 import { ConfirmDialogHost, confirmDialog, noticeDialog } from './components/ConfirmDialog';
 import { SignedCompressDialog, type SignedCompressChoice } from './components/SignedCompressDialog';
 import { ThumbnailsSidebar } from './components/ThumbnailsSidebar';
 import { FindReplacePanel } from './components/FindReplacePanel';
 import { StatusBar } from './components/StatusBar';
 import { ExportPanel } from './components/ExportPanel';
+import { isEncryptedDocument, pdfBytesForConversion } from './export-formats';
 import { PasswordDialog } from './components/PasswordDialog';
 import { SecurityPanel } from './components/SecurityPanel';
 import { useTextStyleActions, type TextStyleUI } from './hooks/useTextStyleActions';
@@ -71,6 +78,34 @@ export interface SearchMatch {
   runText: string;
 }
 
+
+/**
+ * Find & Replace writes the replacement with the matched text's font, or Helvetica when that
+ * font lacks a letter. Neither has Devanagari, CJK and similar scripts, so those letters
+ * would come out as "?" boxes. Returns the message to show instead, or null if all is fine.
+ */
+function missingGlyphsMessage(replacement: string, missingCharCodes: number[]): string | null {
+  if (missingCharCodes.length === 0) return null;
+  return `Can't replace with "${replacement}": this PDF's fonts can't show some of its letters, so they would appear as "?". Nothing was changed.`;
+}
+
+/**
+ * Opens a PDF whose pages are being merged or inserted. A plain parse keeps an encrypted
+ * file's streams encrypted, and copied into this document they render as blank pages, so
+ * decrypt it (empty password, as owner-only protected files allow) or refuse it.
+ */
+async function loadPdfToInsert(file: File): Promise<PDFDocumentData> {
+  const loaded = await getPdfBackend().load(new Uint8Array(await file.arrayBuffer()));
+  if (loaded.status === 'password-required') {
+    throw new Error('That PDF is password-protected. Open it on its own and remove the password, then add it here');
+  }
+  return loaded.doc;
+}
+
+/** A page's content stream objects. Edits store new stream objects, so identity tells if it changed. */
+function pageContentStreams(doc: PDFDocumentData, pageIndex: number): PDFObject[] {
+  return doc.pages[pageIndex].contentRefs.map((ref) => doc.objects.get(ref.toKey()) as PDFObject);
+}
 
 /** True if the run is underlined or a thin stroke path sits under it (certificate labels). */
 function runHasPathUnderline(run: TextRun, paths: PathItem[]): boolean {
@@ -328,6 +363,8 @@ export default function EditorPage() {
   const [thumbnails, setThumbnails] = useState<string[]>([]);
   const [thumbnailKey, setThumbnailKey] = useState(0);
   const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
+  /** Per page, the content streams its thumbnail was drawn from (see pageContentStreams). */
+  const thumbnailSourcesRef = useRef<PDFObject[][]>([]);
 
   const [activeTool, setActiveTool] = useState<EditorTool>('text');
   /** Redaction marks placed on the current page and not applied yet. */
@@ -482,6 +519,7 @@ export default function EditorPage() {
   const [watermarkImageFile, setWatermarkImageFile] = useState<File | null>(null);
   const [watermarkImageBytes, setWatermarkImageBytes] = useState<Uint8Array | null>(null);
   const [watermarkImageDims, setWatermarkImageDims] = useState<{ width: number; height: number } | null>(null);
+  const [watermarkImageAlpha, setWatermarkImageAlpha] = useState<{ widthPx: number; heightPx: number; data: Uint8Array; samples: Uint8Array } | null>(null);
   const [watermarkBlendMode, setWatermarkBlendMode] = useState('Normal');
 
   const [detectedWatermarks, setDetectedWatermarks] = useState<DetectedWatermark[] | null>(null);
@@ -679,6 +717,33 @@ export default function EditorPage() {
     setIsDirty(true);
   }, [pushEditorHistory]);
 
+  /**
+   * Text-box counterpart of updateFloatingImages. Text boxes were never
+   * recorded, so Undo couldn't remove, move back or restore one, and undoing
+   * an unrelated edit restored an older snapshot that silently dropped boxes
+   * added since. Typing is recorded once, when the box loses focus.
+   */
+  const updateFloatingTexts = useCallback((
+    updater: (prev: FloatingText[]) => FloatingText[],
+    label?: string,
+  ) => {
+    const next = updater(floatingTextsRef.current);
+    floatingTextsRef.current = next;
+    setFloatingTexts(next);
+    if (label) {
+      pushEditorHistory(label, { floatingTexts: next });
+      setIsDirty(true);
+    }
+    return next;
+  }, [pushEditorHistory]);
+
+  const recordFloatingTexts = useCallback((label: string) => {
+    pushEditorHistory(label, { floatingTexts: floatingTextsRef.current });
+    setIsDirty(true);
+  }, [pushEditorHistory]);
+  /** Text of the focused text box when it gained focus (to record typing on blur). */
+  const floatingTextAtFocusRef = useRef<{ id: string; text: string } | null>(null);
+
   const [selectedDrawingPage, setSelectedDrawingPage] = useState(currentPage);
   if (selectedDrawingPage !== currentPage) {
     setSelectedDrawingPage(currentPage);
@@ -767,17 +832,16 @@ export default function EditorPage() {
   const patchActiveFloatingText = useCallback((patch: Partial<TextBoxStyle>): boolean => {
     const id = activeFloatingTextIdRef.current;
     if (!id) return false;
-    setFloatingTexts(prev => prev.map(p => {
+    updateFloatingTexts(prev => prev.map(p => {
       if (p.id !== id) return p;
       const next = { ...p, ...patch };
       // Keep the box's top edge fixed when the size changes.
       if (patch.fontSize != null && patch.fontSize !== p.fontSize) next.pdfY = p.pdfY + p.fontSize - patch.fontSize;
       return next;
-    }));
-    setIsDirty(true);
+    }), 'format-text-box');
     requestAnimationFrame(() => floatingTextAreaRefs.current.get(id)?.focus({ preventScroll: true }));
     return true;
-  }, []);
+  }, [updateFloatingTexts]);
 
   const queueOrApplyStyle = useCallback((patch: Partial<TextStyleUI>) => {
     if (patchActiveFloatingText(patch)) return;
@@ -1102,6 +1166,8 @@ export default function EditorPage() {
 
         const engine = await import('@/engine');
         engineRef.current = engine;
+        // Form values in scripts Helvetica can't draw (Hindi, CJK…) are shaped by the browser.
+        engine.setComplexTextRasterizer(rasterizeTextLine);
         setEngineModule(engine);
 
         // Prefer dirty session recovery ONLY when it matches the current document file name
@@ -1219,16 +1285,21 @@ export default function EditorPage() {
       setIsGeneratingThumbnails(true);
       const engine = engineRef.current!;
       const thumbs: string[] = [];
+      const sources: PDFObject[][] = [];
 
       try {
         for (let i = 0; i < doc!.pages.length; i++) {
           if (cancelled) break;
+          sources.push(pageContentStreams(doc!, i));
           // Render at 15% scale for a quick thumbnail
           const res = await engine.renderPage(doc!, i, { scale: 0.15, renderText: true, renderPaths: true, renderImages: true });
           if (cancelled) break;
           thumbs.push(res.canvas.toDataURL('image/jpeg', 0.6));
         }
-        if (!cancelled) setThumbnails(thumbs);
+        if (!cancelled) {
+          thumbnailSourcesRef.current = sources;
+          setThumbnails(thumbs);
+        }
       } catch (e) {
         console.error('[Editor] Thumbnail generation failed:', e);
       } finally {
@@ -1244,6 +1315,37 @@ export default function EditorPage() {
       setIsGeneratingThumbnails(false);
     };
   }, [doc, thumbnailKey]);
+
+  // Content edits (text, Replace All, redaction…) swap a page's content stream but keep the
+  // same `doc` object, so the effect above doesn't rerun. Redraw just the thumbnails whose
+  // content changed, once edits settle.
+  useEffect(() => {
+    if (!doc || !engineRef.current || isGeneratingThumbnails) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const sources = thumbnailSourcesRef.current;
+      if (sources.length !== doc.pages.length) return;
+      const updated = new Map<number, { url: string; source: PDFObject[] }>();
+      for (let i = 0; i < doc.pages.length; i++) {
+        const now = pageContentStreams(doc, i);
+        if (now.length === sources[i].length && now.every((s, k) => s === sources[i][k])) continue;
+        try {
+          const res = await engineRef.current!.renderPage(doc, i, { scale: 0.15, renderText: true, renderPaths: true, renderImages: true });
+          if (cancelled) return;
+          updated.set(i, { url: res.canvas.toDataURL('image/jpeg', 0.6), source: now });
+        } catch (e) {
+          console.warn('[Editor] Thumbnail refresh failed:', e);
+        }
+      }
+      if (cancelled || updated.size === 0) return;
+      for (const [i, { source }] of updated) sources[i] = source;
+      setThumbnails((prev) => prev.map((t, i) => updated.get(i)?.url ?? t));
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [doc, renderKey, isGeneratingThumbnails]);
 
   // Reset edit state when doc or page changes. Both change from many places
   // (load, navigation, page operations), and the reset also clears refs
@@ -1996,6 +2098,12 @@ export default function EditorPage() {
         if (engine.hasEmoji(commitText) && engine.countEmoji(commitText) > engine.countEmoji(originalText)) {
           setError('Emoji can\'t be embedded in this PDF\'s fonts, so they won\'t appear in the downloaded file.');
         }
+        // Same for other scripts the edited font lacks: the Helvetica fallback
+        // has no Devanagari etc., so the edit writes '?' — say so.
+        const unsupported = unsupportedStandardFontChars(
+          editResult.missingCharCodes.map(cp => String.fromCodePoint(cp)).join(''),
+        ).filter(ch => !engine.hasEmoji(ch));
+        if (unsupported.length > 0) setError(unsupportedCharsWarning(unsupported));
         if (editResult.needsFontAugmentation) {
           try {
             const missing = String.fromCharCode(
@@ -2502,7 +2610,6 @@ export default function EditorPage() {
     if (!doc || !findText.trim()) return [];
 
     const query = findText.trim();
-    const lowerQuery = caseSensitive ? query : query.toLowerCase();
     const matches: SearchMatch[] = [];
 
     for (let p = 0; p < doc.pages.length; p++) {
@@ -2511,41 +2618,20 @@ export default function EditorPage() {
         const bytes = getPageContentBytes(page, doc.objects);
         const interpreted = interpretPage(bytes, page, doc.objects);
 
-        for (const run of interpreted.textRuns) {
-          const text = run.text;
-          const textToSearch = caseSensitive ? text : text.toLowerCase();
-          let idx = 0;
-          while ((idx = textToSearch.indexOf(lowerQuery, idx)) !== -1) {
-            const endIdx = idx + query.length;
-            let pdfX = run.x;
-            let pdfWidth = run.width;
-
-            if (run.glyphs && run.glyphs.length === run.text.length) {
-              const startG = run.glyphs[idx];
-              const endG = run.glyphs[endIdx - 1];
-              if (startG && endG) {
-                pdfX = startG.x;
-                pdfWidth = (endG.x + endG.width) - startG.x;
-              }
-            } else if (run.text.length > 0) {
-              const charW = run.width / run.text.length;
-              pdfX = run.x + idx * charW;
-              pdfWidth = query.length * charW;
-            }
-
-            matches.push({
-              id: `m-${p}-${idx}-${matches.length}`,
-              pageIndex: p,
-              pdfX,
-              pdfY: run.y,
-              pdfWidth: Math.max(pdfWidth, 3),
-              pdfHeight: run.height || run.fontSize || 12,
-              matchedText: text.substring(idx, endIdx),
-              runText: text,
-            });
-
-            idx += Math.max(query.length, 1);
-          }
+        // Same matcher as Replace (findAndReplace), so the counter and the replaced
+        // occurrence always agree; it also finds words split across text runs.
+        for (const match of findTextMatches(interpreted.textRuns, query, caseSensitive)) {
+          const box = textMatchBounds(match);
+          matches.push({
+            id: `m-${p}-${match.start}-${matches.length}`,
+            pageIndex: p,
+            pdfX: box.x,
+            pdfY: box.y,
+            pdfWidth: Math.max(box.width, 3),
+            pdfHeight: box.height,
+            matchedText: match.chain.text.substring(match.start, match.end),
+            runText: match.chain.text,
+          });
         }
       } catch (e) {
         console.warn(`[Search] Error on page ${p}:`, e);
@@ -2600,6 +2686,11 @@ export default function EditorPage() {
         .slice(0, activeMatchIndex)
         .filter((m) => m.pageIndex === currentMatch.pageIndex).length;
       const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive, occurrence);
+      const unshowable = missingGlyphsMessage(replaceText, result.missingCharCodes);
+      if (unshowable) {
+        setError(unshowable);
+        return;
+      }
       if (result.newContentBytes && result.newContentBytes !== bytes) {
         ensureHistoryBaseline(currentMatch.pageIndex);
         await engine.updatePageContent(page.contentRefs, result.newContentBytes, doc.objects);
@@ -2622,13 +2713,21 @@ export default function EditorPage() {
       // Work out every page's replacement first, then record the batch so a
       // single Undo reverts all pages at once (BE-203).
       const changes: { pageIndex: number; bytes: Uint8Array }[] = [];
+      const missing: number[] = [];
       for (let p = 0; p < doc.pages.length; p++) {
         const page = doc.pages[p];
         const bytes = engine.getPageContentBytes(page, doc.objects);
         const result = engine.findAndReplace(bytes, page, doc.objects, findText.trim(), replaceText, caseSensitive);
+        missing.push(...result.missingCharCodes);
         if (result.newContentBytes && result.newContentBytes !== bytes) {
           changes.push({ pageIndex: p, bytes: result.newContentBytes });
         }
+      }
+      // All or nothing: don't replace on some pages and leave "?" boxes on others.
+      const unshowable = missingGlyphsMessage(replaceText, missing);
+      if (unshowable) {
+        setError(unshowable);
+        return;
       }
       for (const { pageIndex } of changes) {
         if (!historyRef.current.hasPage(pageIndex)) pushEditorHistory('baseline', undefined, pageIndex);
@@ -2662,7 +2761,7 @@ export default function EditorPage() {
       const words = await adapter.recognize(imageData);
       const page = doc.pages[currentPage];
       const dpr = window.devicePixelRatio || 1;
-      const mapped = mapOcrWordsToPdf(words, page.mediaBox.height, scale, page.mediaBox.y, dpr);
+      const mapped = mapOcrWordsToPdf(words, page.mediaBox.height, scale, page.mediaBox.y, dpr, page.mediaBox.x);
       if (mapped.length > 0) {
         await engineRef.current.insertInvisibleTextLayer(doc, currentPage, mapped);
         setIsDirty(true);
@@ -2687,6 +2786,8 @@ export default function EditorPage() {
       const engine = engineRef.current;
       await engine.flattenFormFieldsOnPage(doc, currentPage, formFields);
       pushEditorHistory('flatten-forms');
+      // Without this, a download right after flattening returned the original file.
+      setIsDirty(true);
       setFormFields([]);
       setSelectedFormField(null);
       setFormFieldDraft('');
@@ -2697,15 +2798,7 @@ export default function EditorPage() {
     } finally {
       setIsSaving(false);
     }
-  }, [doc, currentPage, formFields, pushEditorHistory]);
-
-  /**
-   * Set when Shift+Enter is pressed mid-edit: the edit is committed first, and
-   * the duplicate is made from the re-extracted line once the page re-renders.
-   * The anchor's instruction indices point at the pre-edit content, so
-   * duplicating it directly copied the original text over the edited line.
-   */
-  const pendingDuplicateRef = useRef<{ baseline: number; x: number } | null>(null);
+  }, [doc, currentPage, formFields, pushEditorHistory, setIsDirty]);
 
   const duplicateLine = useCallback(async (line: TextLine) => {
     if (!doc || !engineRef.current) return;
@@ -2731,23 +2824,25 @@ export default function EditorPage() {
     const line = editAnchorLineRef.current ?? selectedLine ?? editingLine;
     if (!doc || !engineRef.current || !line) return;
     if (editingLine) {
-      pendingDuplicateRef.current = { baseline: line.baseline, x: line.x };
-      await handleEditSubmit(false);
+      // Commit (and close) the edit first, then duplicate the line as it is
+      // in the committed content: the anchor's instruction indices point at
+      // the pre-edit stream, so copying it directly put the original text
+      // over the edited line. Waiting for a re-render instead never fired
+      // when the edit was left open or nothing had changed.
+      const anchor = { baseline: line.baseline, x: line.x };
+      await handleEditSubmit(true);
+      const engine = engineRef.current;
+      const page = doc.pages[currentPage];
+      const bytes = engine.getPageContentBytes(page, doc.objects);
+      const lines = engine.buildDocumentFlow(engine.interpretPage(bytes, page, doc.objects).textRuns).lines;
+      const fresh = lines.find((l: TextLine) =>
+        Math.abs(l.baseline - anchor.baseline) < 2 && Math.abs(l.x - anchor.x) < 4,
+      );
+      if (fresh) await duplicateLine(fresh);
       return;
     }
     await duplicateLine(line);
-  }, [doc, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
-
-  // Finish a Shift+Enter duplicate once the committed edit has re-rendered.
-  useEffect(() => {
-    const pending = pendingDuplicateRef.current;
-    if (!pending || !renderResult || editingLine) return;
-    pendingDuplicateRef.current = null;
-    const fresh = renderResult.textLines.find(l =>
-      Math.abs(l.baseline - pending.baseline) < 2 && Math.abs(l.x - pending.x) < 4,
-    );
-    if (fresh) void duplicateLine(fresh);
-  }, [renderResult, editingLine, duplicateLine]);
+  }, [doc, currentPage, selectedLine, editingLine, handleEditSubmit, duplicateLine]);
 
   // Resolve table cell for the current selection (for sidebar actions)
   const selectedTableCell = (() => {
@@ -2807,7 +2902,7 @@ export default function EditorPage() {
       }
       const page = doc.pages[currentPage];
       const bytes = engineRef.current.getPageContentBytes(page, doc.objects);
-      const next = engineRef.current.insertTableColumnRight(bytes, rows);
+      const next = engineRef.current.insertTableColumnRight(bytes, rows, page, doc.objects);
       await engineRef.current.updatePageContent(page.contentRefs, next, doc.objects);
       pushEditorHistory('table-add-column');
       setIsDirty(true);
@@ -3073,9 +3168,8 @@ export default function EditorPage() {
       setTextList('none');
 
       focusFloatingTextIdRef.current = newBox.id;
-      setFloatingTexts(prev => [...prev, newBox]);
+      updateFloatingTexts(prev => [...prev, newBox], 'add-text-box');
       setActiveFloatingTextId(newBox.id);
-      setIsDirty(true);
       setActiveTool('text');
 
     } else if (activeTool === 'highlight') {
@@ -3129,7 +3223,7 @@ export default function EditorPage() {
       setSelectedSignatureId(null);
       setSelectedPdfSigFieldId(null);
     }
-  }, [renderResult, doc, currentPage, scale, activeTool, editingLine, handleEditSubmit, beginEditSession, displayItems, textFontSize, textColor, textFontFamily, highlightColor, formFields, handleFormFieldSelect, linksHighlighted, linkPopoverMode, resolveLinkDisplay, pdfSignatureFields, placeLibrarySignatureIntoField, pushEditorHistory]);
+  }, [renderResult, doc, currentPage, scale, activeTool, editingLine, handleEditSubmit, beginEditSession, displayItems, textFontSize, textColor, textFontFamily, highlightColor, formFields, handleFormFieldSelect, linksHighlighted, linkPopoverMode, resolveLinkDisplay, pdfSignatureFields, placeLibrarySignatureIntoField, pushEditorHistory, updateFloatingTexts]);
 
   // Double-click in select mode → enter text edit
   const handleCanvasDoubleClick = useCallback((e: React.MouseEvent) => {
@@ -3444,6 +3538,7 @@ export default function EditorPage() {
         renderResult?.pageWidth || page.mediaBox.width,
         pageHeight,
         page.mediaBox.x, page.mediaBox.y,
+        page.rotate,
       );
 
       for (const p of paths) {
@@ -3536,7 +3631,8 @@ export default function EditorPage() {
 
       if (fTexts.length > 0 || fImages.length > 0) {
         const contentBytes = engine.getPageContentBytes(page, doc.objects);
-        let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
+        // Text boxes and images are placed in default user space (Chromium PDFs leave a flipped CTM).
+        let newContentBytes: Uint8Array = engine.isolateGraphicsState(new Uint8Array(contentBytes));
 
         for (const ft of fTexts) {
           if (!ft.text.trim()) continue;
@@ -3550,15 +3646,17 @@ export default function EditorPage() {
         }
 
         for (const fi of fImages) {
+          // On a /Rotate page the box is turned into the page's own space.
+          const at = displayBoxToPage(fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight, page, page.mediaBox.height);
           const { newContentBytes: b } = await engine.insertImageRun(
             newContentBytes, page, doc.objects,
-            fi.dataUrl, fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight,
+            fi.dataUrl, at.x, at.yTop, fi.pdfWidth, fi.pdfHeight,
             () => {
               const num = currentObjNum;
               currentObjNum++;
               return num;
             },
-            fi.rotation || 0
+            (fi.rotation || 0) + at.rotation
           );
           newContentBytes = b;
         }
@@ -3667,6 +3765,7 @@ export default function EditorPage() {
       renderResult?.pageWidth || page.mediaBox.width,
       pageHeight,
       page.mediaBox.x, page.mediaBox.y,
+      page.rotate,
     );
 
     for (const p of paths) {
@@ -3757,7 +3856,8 @@ export default function EditorPage() {
     if (texts.length > 0 || images.length > 0) {
       isolateResources(page);
       const contentBytes = engine.getPageContentBytes(page, exportDoc.objects);
-      let newContentBytes: Uint8Array = new Uint8Array(contentBytes);
+      // Text boxes and images are placed in default user space (Chromium PDFs leave a flipped CTM).
+      let newContentBytes: Uint8Array = engine.isolateGraphicsState(new Uint8Array(contentBytes));
 
       for (const ft of texts) {
         if (!ft.text.trim()) continue;
@@ -3768,11 +3868,12 @@ export default function EditorPage() {
       }
 
       for (const fi of images) {
+        const at = displayBoxToPage(fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight, page, page.mediaBox.height);
         const { newContentBytes: b } = await engine.insertImageRun(
           newContentBytes, page, exportDoc.objects,
-          fi.dataUrl, fi.pdfX, fi.pdfY, fi.pdfWidth, fi.pdfHeight,
+          fi.dataUrl, at.x, at.yTop, fi.pdfWidth, fi.pdfHeight,
           () => currentObjNum++,
-          fi.rotation || 0
+          (fi.rotation || 0) + at.rotation
         );
         newContentBytes = b;
       }
@@ -3799,11 +3900,12 @@ export default function EditorPage() {
         const src = library.get(sig.appearanceId)?.imageDataUrl;
         if (!src) continue;
         // Signature rotation is counter-clockwise; insertImageRun rotates clockwise.
+        const at = displayBoxToPage(sig.x, sig.y + sig.height, sig.width, sig.height, sigPage);
         const { newContentBytes } = await engine.insertImageRun(
           bytes, sigPage, exportDoc.objects,
-          src, sig.x, sig.y + sig.height, sig.width, sig.height,
+          src, at.x, at.yTop, sig.width, sig.height,
           () => currentObjNum++,
-          -(sig.rotation || 0),
+          -(sig.rotation || 0) + at.rotation,
           { preserveAlpha: true, opacity: sig.opacity },
         );
         bytes = newContentBytes;
@@ -4255,6 +4357,7 @@ export default function EditorPage() {
       startPdfX: box.pdfX,
       startPdfY: box.pdfY
     };
+    let moved = false;
 
     const handleMove = (me: PointerEvent) => {
       if (!dragInfo.current || !doc || !renderResult) return;
@@ -4265,7 +4368,8 @@ export default function EditorPage() {
 
       const { startPdfX, startPdfY } = dragInfo.current;
 
-      setFloatingTexts(prev => prev.map(p => p.id === id ? {
+      moved = true;
+      updateFloatingTexts(prev => prev.map(p => p.id === id ? {
         ...p,
         pdfX: startPdfX + pdfDx,
         pdfY: startPdfY + pdfDy,
@@ -4274,13 +4378,14 @@ export default function EditorPage() {
 
     const handleUp = () => {
       dragInfo.current = null;
+      if (moved) recordFloatingTexts('move-text-box');
       window.removeEventListener('pointermove', handleMove);
       window.removeEventListener('pointerup', handleUp);
     };
 
     window.addEventListener('pointermove', handleMove);
     window.addEventListener('pointerup', handleUp);
-  }, [floatingTexts, scale, doc, renderResult]);
+  }, [floatingTexts, scale, doc, renderResult, updateFloatingTexts, recordFloatingTexts]);
 
   const handleFloatingImagePointerDown = useCallback((e: React.PointerEvent, id: string) => {
     e.stopPropagation();
@@ -4834,7 +4939,9 @@ export default function EditorPage() {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    setWatermarkImageFile(file);
+    // The original file stays the preview and the label; the PDF gets a JPEG
+    // plus, for images with transparency, a soft mask built from the alpha.
+    // All of it is set together once ready, so "Loaded" means "can apply".
 
     const reader = new FileReader();
     reader.onload = async (ev) => {
@@ -4853,15 +4960,32 @@ export default function EditorPage() {
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0);
 
+          // Transparency (a logo on a clear background) becomes a soft mask,
+          // so the white the JPEG is flattened onto doesn't cover the page.
+          const alphaCanvas = document.createElement('canvas');
+          alphaCanvas.width = canvas.width;
+          alphaCanvas.height = canvas.height;
+          const actx = alphaCanvas.getContext('2d');
+          let alpha: { widthPx: number; heightPx: number; data: Uint8Array; samples: Uint8Array } | null = null;
+          if (actx) {
+            actx.drawImage(img, 0, 0);
+            const rgba = actx.getImageData(0, 0, canvas.width, canvas.height).data;
+            const samples = new Uint8Array(canvas.width * canvas.height);
+            let translucent = false;
+            for (let i = 0; i < samples.length; i++) {
+              samples[i] = rgba[i * 4 + 3];
+              if (samples[i] < 255) translucent = true;
+            }
+            if (translucent) alpha = { widthPx: canvas.width, heightPx: canvas.height, data: pako.deflate(samples), samples };
+          }
+
           canvas.toBlob(blob => {
             if (blob) {
               blob.arrayBuffer().then(buf => {
                 setWatermarkImageBytes(new Uint8Array(buf));
                 setWatermarkImageDims({ width: img.naturalWidth, height: img.naturalHeight });
-
-                // Override the file to be considered JPEG
-                const jpegFile = new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
-                setWatermarkImageFile(jpegFile);
+                setWatermarkImageAlpha(alpha);
+                setWatermarkImageFile(file);
               });
             }
           }, 'image/jpeg', 0.9);
@@ -4877,6 +5001,7 @@ export default function EditorPage() {
     setWatermarkImageFile(null);
     setWatermarkImageBytes(null);
     setWatermarkImageDims(null);
+    setWatermarkImageAlpha(null);
   }, []);
 
   const handleApplyWatermark = useCallback(() => {
@@ -4930,6 +5055,10 @@ export default function EditorPage() {
           position: watermarkPosition,
           pageIndices
         };
+        // Text the standard fonts can't encode (Hindi, CJK…) is shaped by the browser.
+        if (!engineRef.current.isWinAnsiEncodable(watermarkText)) {
+          wm.raster = rasterizeTextLine(watermarkText, wm.fontSize, wm.color) ?? undefined;
+        }
       } else if (watermarkType === 'shape') {
         const r = parseInt(watermarkColor.slice(1, 3), 16) / 255;
         const g = parseInt(watermarkColor.slice(3, 5), 16) / 255;
@@ -4969,19 +5098,22 @@ export default function EditorPage() {
           position: watermarkPosition,
           pageIndices
         };
+        if (watermarkText && !engineRef.current.isWinAnsiEncodable(watermarkText)) {
+          wm.raster = rasterizeTextLine(watermarkText, fontSizePt, [r, g, b]) ?? undefined;
+        }
       } else {
         if (!watermarkImageBytes || !watermarkImageDims || !watermarkImageFile) {
           setError('Please upload an image first');
           return;
         }
 
-        const mimeType = watermarkImageFile.type === 'image/png' ? 'image/png' : 'image/jpeg';
-
         wm = {
           id: `wm-${Date.now()}`,
           type: 'image',
+          // The upload handler always re-encodes the image as JPEG.
           imageBytes: watermarkImageBytes,
-          mimeType,
+          mimeType: 'image/jpeg',
+          softMask: watermarkImageAlpha ?? undefined,
           width: watermarkImageDims.width * (fittedSize / 100),
           height: watermarkImageDims.height * (fittedSize / 100),
           opacity: watermarkOpacity / 100,
@@ -5018,7 +5150,7 @@ export default function EditorPage() {
       console.error('[Editor] Apply watermark failed:', e);
       setError(actionErrorMessage('Couldn\'t apply the watermark', e));
     }
-  }, [doc, watermarkType, watermarkText, watermarkFontName, watermarkOpacity, watermarkRotation, watermarkSize, watermarkPosition, watermarkMosaic, watermarkPageFrom, watermarkPageTo, watermarkLayer, watermarkColor, watermarkShapeColor, watermarkShapeType, watermarkImageBytes, watermarkImageDims, watermarkImageFile, watermarkBlendMode]);
+  }, [doc, watermarkType, watermarkText, watermarkFontName, watermarkOpacity, watermarkRotation, watermarkSize, watermarkPosition, watermarkMosaic, watermarkPageFrom, watermarkPageTo, watermarkLayer, watermarkColor, watermarkShapeColor, watermarkShapeType, watermarkImageBytes, watermarkImageDims, watermarkImageFile, watermarkImageAlpha, watermarkBlendMode]);
 
   // ── Signature handlers ──
   const resolveSignatureImage = useCallback((sig: VisualSignature): string | null => {
@@ -5140,7 +5272,8 @@ export default function EditorPage() {
     // content and currently drops non-black text fill colors / some vector paints,
     // which destroys green headings and table fills in Word export.
     const raw = doc.rawBytes;
-    if (!isDirty && raw && raw.byteLength > 5) {
+    const encrypted = isEncryptedDocument(doc);
+    if (!isDirty && !encrypted && raw && raw.byteLength > 5) {
       return raw instanceof Uint8Array ? raw : new Uint8Array(raw);
     }
     const exportDoc = await createExportDocWithOverlays(
@@ -5150,9 +5283,21 @@ export default function EditorPage() {
       floatingTextsRef.current,
       floatingImagesRef.current
     );
+    // The converter can't decrypt: give it the opened document without encryption.
+    if (encrypted) return pdfBytesForConversion(exportDoc, engineRef.current);
     const bytes = await getPdfBackend().save(exportDoc, 'quick');
     return bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   }, [doc, currentPage, isDirty, createExportDocWithOverlays]);
+
+  // Asks before a download rewrites a signed PDF (compression, or edits after signing).
+  const [signedCompressOpen, setSignedCompressOpen] = useState(false);
+  const [signedDialogReason, setSignedDialogReason] = useState<'compress' | 'edit'>('compress');
+  const signedCompressResolveRef = useRef<((choice: SignedCompressChoice) => void) | null>(null);
+  const chooseSignedCompress = useCallback((choice: SignedCompressChoice) => {
+    setSignedCompressOpen(false);
+    signedCompressResolveRef.current?.(choice);
+    signedCompressResolveRef.current = null;
+  }, []);
 
   // ── Download / Save ──
   const handleDownload = useCallback(async () => {
@@ -5171,8 +5316,21 @@ export default function EditorPage() {
         !!raw && raw.byteLength > 5 &&
         (signedPristineRef.current || (!isDirty && signaturesRef.current.length === 0));
       let bytes: Uint8Array;
-      if (untouched) {
-        bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw);
+      // Rewriting a digitally signed file breaks its signature: ask first.
+      let keepSignedFile = false;
+      if (!untouched && hasDigitalSignature(raw)) {
+        setIsSaving(false);
+        const choice = await new Promise<SignedCompressChoice>((resolve) => {
+          signedCompressResolveRef.current = resolve;
+          setSignedDialogReason('edit');
+          setSignedCompressOpen(true);
+        });
+        if (choice === 'cancel') return;
+        keepSignedFile = choice === 'signed';
+        setIsSaving(true);
+      }
+      if (untouched || keepSignedFile) {
+        bytes = raw instanceof Uint8Array ? raw : new Uint8Array(raw!);
       } else {
         const exportDoc = await createExportDocWithOverlays(
           doc,
@@ -5190,9 +5348,12 @@ export default function EditorPage() {
       a.download = fileName || 'edited.pdf';
       a.click();
       URL.revokeObjectURL(url);
-      const keepSigned = signedPristineRef.current;
-      setIsDirty(false);
-      signedPristineRef.current = keepSigned;
+      // The edits were not in the signed copy, so they still need saving.
+      if (!keepSignedFile) {
+        const keepSigned = signedPristineRef.current;
+        setIsDirty(false);
+        signedPristineRef.current = keepSigned;
+      }
     } catch (e) {
       console.error('[Editor] Download failed:', e);
       setError(actionErrorMessage('Couldn\'t prepare the download', e));
@@ -5202,13 +5363,6 @@ export default function EditorPage() {
   }, [doc, currentPage, fileName, saveMode, isDirty, setIsDirty, createExportDocWithOverlays]);
 
   // ── Compressed Download ──
-  const [signedCompressOpen, setSignedCompressOpen] = useState(false);
-  const signedCompressResolveRef = useRef<((choice: SignedCompressChoice) => void) | null>(null);
-  const chooseSignedCompress = useCallback((choice: SignedCompressChoice) => {
-    setSignedCompressOpen(false);
-    signedCompressResolveRef.current?.(choice);
-    signedCompressResolveRef.current = null;
-  }, []);
 
   const handleCompressedDownload = useCallback(async (opts: {
     quality: number;
@@ -5219,6 +5373,7 @@ export default function EditorPage() {
     if (hasDigitalSignature(doc.rawBytes)) {
       const choice = await new Promise<SignedCompressChoice>((resolve) => {
         signedCompressResolveRef.current = resolve;
+        setSignedDialogReason('compress');
         setSignedCompressOpen(true);
       });
       if (choice === 'cancel') return;
@@ -5295,7 +5450,16 @@ export default function EditorPage() {
   }, [router]);
 
   // ── Page Operations ──
-  const refreshAfterPageOp = useCallback((nextDoc: PDFDocumentData, nextCurrentPage?: number) => {
+  const refreshAfterPageOp = useCallback((
+    nextDoc: PDFDocumentData,
+    nextCurrentPage?: number,
+    pageChange?: Parameters<EditorHistory['applyPageChange']>[0],
+  ) => {
+    // Undo entries are keyed by page index: renumber them with the pages.
+    if (pageChange) {
+      historyRef.current.applyPageChange(pageChange);
+      syncTxState();
+    }
     setDoc({ ...nextDoc });
     setTotalPages(nextDoc.pages.length);
     if (nextCurrentPage != null) {
@@ -5306,7 +5470,7 @@ export default function EditorPage() {
     setIsDirty(true);
     setRenderKey((k) => k + 1);
     setThumbnailKey((k) => k + 1);
-  }, [currentPage]);
+  }, [currentPage, syncTxState]);
 
   const downloadPdfBytes = useCallback((bytes: Uint8Array, name: string) => {
     const blob = new Blob([bytes as unknown as BlobPart], { type: 'application/pdf' });
@@ -5328,7 +5492,7 @@ export default function EditorPage() {
       } else if (currentPage > index) {
         nextPage = currentPage - 1;
       }
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'delete', index });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t delete the page', e));
     }
@@ -5356,7 +5520,7 @@ export default function EditorPage() {
       } else if (currentPage >= toIndex && currentPage < fromIndex) {
         nextPage = currentPage + 1;
       }
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'move', from: fromIndex, to: toIndex });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t reorder the pages', e));
     }
@@ -5365,8 +5529,7 @@ export default function EditorPage() {
   const handleMergePdf = useCallback(async (file: File) => {
     if (!doc || !engineRef.current) return;
     try {
-      const buffer = await file.arrayBuffer();
-      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
+      const sourceDoc = await loadPdfToInsert(file);
       const insertAt = doc.pages.length;
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, insertAt);
       refreshAfterPageOp(doc);
@@ -5600,7 +5763,7 @@ export default function EditorPage() {
     try {
       engineRef.current.insertBlankPage(doc, index);
       const nextPage = currentPage >= index ? currentPage + 1 : currentPage;
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: 1 });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t insert a blank page', e));
     }
@@ -5609,11 +5772,10 @@ export default function EditorPage() {
   const handleInsertPdf = useCallback(async (index: number, file: File) => {
     if (!doc || !engineRef.current) return;
     try {
-      const buffer = await file.arrayBuffer();
-      const sourceDoc = await getPdfBackend().parse(new Uint8Array(buffer));
+      const sourceDoc = await loadPdfToInsert(file);
       engineRef.current.insertPagesFromDocument(doc, sourceDoc, index);
       const nextPage = currentPage >= index ? currentPage + sourceDoc.pages.length : currentPage;
-      refreshAfterPageOp(doc, nextPage);
+      refreshAfterPageOp(doc, nextPage, { kind: 'insert', index, count: sourceDoc.pages.length });
     } catch (e) {
       setError(actionErrorMessage('Couldn\'t insert the PDF', e));
     }
@@ -6396,16 +6558,14 @@ export default function EditorPage() {
               .filter(m => m.pageIndex === currentPage)
               .map((m) => {
                 const isCurrent = searchResults[activeMatchIndex]?.id === m.id;
-                const mediaBox = doc?.pages[currentPage]?.mediaBox;
-                const pageH = mediaBox?.height || 0;
-                const mbX = mediaBox?.x || 0;
-                const mbY = mediaBox?.y || 0;
-
-                const { cssX: x1, cssY: y1 } = pdfToCanvas(m.pdfX, m.pdfY + m.pdfHeight, scale, pageH, mbX, mbY);
-                const { cssX: x2, cssY: y2 } = pdfToCanvas(m.pdfX + m.pdfWidth, m.pdfY, scale, pageH, mbX, mbY);
-
-                const w = Math.max(Math.abs(x2 - x1), 4);
-                const h = Math.max(Math.abs(y2 - y1), 8);
+                const pageInfo = doc?.pages[currentPage];
+                if (!pageInfo) return null;
+                // Turned with the page on /Rotate pages, like the renderer does.
+                const rect = pdfBoxToCanvasRect(
+                  { x: m.pdfX, y: m.pdfY, width: m.pdfWidth, height: m.pdfHeight },
+                  pageInfo,
+                  scale,
+                );
 
                 return (
                   <div
@@ -6415,11 +6575,12 @@ export default function EditorPage() {
                         ? 'bg-amber-400/80 border-2 border-amber-600 ring-4 ring-amber-400/40 shadow-lg scale-[1.04] z-30'
                         : 'bg-yellow-300/45 border border-yellow-500/80 shadow-sm z-20 hover:bg-yellow-300/70'
                     }`}
+                    data-testid="search-highlight"
                     style={{
-                      left: Math.min(x1, x2),
-                      top: Math.min(y1, y2),
-                      width: w,
-                      height: h,
+                      left: rect.left,
+                      top: rect.top,
+                      width: Math.max(rect.width, 4),
+                      height: Math.max(rect.height, 4),
                     }}
                   />
                 );
@@ -6614,10 +6775,13 @@ export default function EditorPage() {
                 >
                   {isActive && (
                     <button
+                      type="button"
+                      aria-label="Delete text box"
+                      title="Delete text box"
                       className="absolute -top-3 -right-3 bg-red-500 text-white rounded-full p-1 shadow hover:bg-red-600 transition-colors z-30"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setFloatingTexts(prev => prev.filter(p => p.id !== ft.id));
+                        updateFloatingTexts(prev => prev.filter(p => p.id !== ft.id), 'delete-text-box');
                         if (activeFloatingTextId === ft.id) setActiveFloatingTextId(null);
                       }}
                     >
@@ -6642,9 +6806,25 @@ export default function EditorPage() {
                     value={ft.text}
                     spellCheck={false}
                     onChange={(e) => {
-                      setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text: e.target.value } : p));
+                      const text = e.target.value;
+                      // Text boxes use Standard 14 fonts (WinAnsi), which have
+                      // no glyphs for other scripts: warn when one is typed.
+                      const unsupported = unsupportedStandardFontChars(text);
+                      if (unsupported.length > unsupportedStandardFontChars(ft.text).length) {
+                        setError(unsupportedCharsWarning(unsupported));
+                      }
+                      updateFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, text } : p));
                     }}
-                    onFocus={() => setActiveFloatingTextId(ft.id)}
+                    onFocus={() => {
+                      floatingTextAtFocusRef.current = { id: ft.id, text: ft.text };
+                      setActiveFloatingTextId(ft.id);
+                    }}
+                    onBlur={() => {
+                      const atFocus = floatingTextAtFocusRef.current;
+                      floatingTextAtFocusRef.current = null;
+                      const now = floatingTextsRef.current.find(p => p.id === ft.id);
+                      if (atFocus?.id === ft.id && now && now.text !== atFocus.text) recordFloatingTexts('edit-text-box');
+                    }}
                     className="bg-transparent outline-none overflow-hidden block resize p-0 m-0 border-0"
                     style={{
                       fontFamily: textBoxCssFamily(st.fontFamily),
@@ -6674,7 +6854,7 @@ export default function EditorPage() {
                       const h = target.offsetHeight / scale;
                       const changed = Math.abs(w - (ft.pdfWidth ?? layout.width + st.fontSize)) > 0.5
                         || Math.abs(h - (ft.pdfHeight ?? layout.height)) > 0.5;
-                      if (changed) setFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p));
+                      if (changed) updateFloatingTexts(prev => prev.map(p => p.id === ft.id ? { ...p, pdfWidth: w, pdfHeight: h } : p), 'resize-text-box');
                     }}
                   />
                   ) : (
@@ -7245,7 +7425,7 @@ export default function EditorPage() {
         <StatusBar
           renderResult={renderResult}
           activeTool={activeTool}
-          selectedRun={selectedLine?.runs[0] ?? null}
+          selectedText={selectedLine?.text ?? null}
           doc={doc}
           totalPages={totalPages}
         />
@@ -7318,7 +7498,7 @@ export default function EditorPage() {
 
       {/* ── Export Panel ── */}
       <ConfirmDialogHost />
-      <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} />
+      <SignedCompressDialog open={signedCompressOpen} onChoose={chooseSignedCompress} reason={signedDialogReason} />
       <ExportPanel
         isOpen={showExportPanel}
         onClose={() => setShowExportPanel(false)}

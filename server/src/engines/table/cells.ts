@@ -212,8 +212,7 @@ function ruledRowWords(
       type: 'paragraph',
       parentId: null,
       childIds: [],
-      // Top-to-bottom, then left-to-right, so words join in reading order.
-      readingOrderIndex: -w.bbox.y * 10_000 + w.bbox.x,
+      readingOrderIndex: 0, // set below
       confidence: 0.85,
       pageIndex: candidate.pageIndex,
       bbox: w.bbox,
@@ -222,7 +221,28 @@ function ruledRowWords(
       runs: [{ ...(style ?? {}), id: createId('srun'), text: w.text }],
     } as SemanticNode);
   }
+  // Top-to-bottom, then left-to-right, so words join in reading order. Words
+  // on one line can sit a fraction of a point apart vertically (shaped scripts
+  // nudge marks up or down), so lines are grouped with a tolerance rather than
+  // ordered by raw y, which used to swap "मूल्य (₹)" into "(₹) मूल्य".
+  const byTop = [...out].sort((a, b) => centerY(b) - centerY(a));
+  const lines: SemanticNode[][] = [];
+  for (const n of byTop) {
+    const line = lines[lines.length - 1];
+    const tol = Math.max(2, n.bbox!.height * 0.5);
+    if (line && Math.abs(centerY(line[0]!) - centerY(n)) <= tol) line.push(n);
+    else lines.push([n]);
+  }
+  let order = 0;
+  for (const line of lines) {
+    line.sort((a, b) => a.bbox!.x - b.bbox!.x);
+    for (const n of line) n.readingOrderIndex = order++;
+  }
   return out.length > 0 ? out : null;
+}
+
+function centerY(n: SemanticNode): number {
+  return n.bbox!.y + n.bbox!.height / 2;
 }
 
 /** Group characters into words at spaces, line changes and wide gaps. */

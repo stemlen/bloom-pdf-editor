@@ -100,8 +100,8 @@ test.describe("text & tables", () => {
     await page.mouse.click(cell.x, cell.y);
     await page.getByRole("button", { name: "Add Column Right" }).click();
     const { bytes } = await downloadPdf(page);
-    // One new (empty) cell per table row, placed right of the last column.
-    expect((await pageContent(bytes, 1)).match(/\(\s\)\s*Tj/g)?.length).toBeGreaterThanOrEqual(4);
+    // One visible "New" placeholder cell per table row (b3d9a8b), right of the last column.
+    expect((await pageContent(bytes, 1)).match(/\(New\)\s*Tj/g)?.length).toBeGreaterThanOrEqual(4);
   });
 
   test("restyle a line: font, colour and alignment", async ({ page }) => {
@@ -266,8 +266,11 @@ test.describe("watermark & security extras", () => {
     await panel.getByRole("button", { name: "Clean", exact: true }).click();
     await panel.getByRole("button", { name: "Sanitize document" }).click();
     await expect(panel.getByText(/sanitiz/i).last()).toBeVisible();
+    // Sanitize already removed any attachments (and sample.pdf has none), so this
+    // reports that there is nothing left; removing real attachments is covered in
+    // security.spec.ts.
     await panel.getByRole("button", { name: "Remove attachments" }).click();
-    await expect(panel.getByText(/Removed \d+ attachment/)).toBeVisible();
+    await expect(panel.getByText("No attachments to remove")).toBeVisible();
     await panel.getByRole("button", { name: "Optimize (keep security)" }).click();
     const { bytes } = await downloadPdf(page);
     expect((await openWithPdfJs(bytes)).pages).toBe(3);

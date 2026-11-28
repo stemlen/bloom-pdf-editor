@@ -320,4 +320,10 @@ export interface PDFDocumentData {
   info: PDFDocumentInfo;
   /** The raw file bytes (kept for incremental saves) */
   rawBytes: Uint8Array;
+  /**
+   * File encryption key, set once an encrypted document has been opened or a
+   * document has been given a password. Objects in memory are then plaintext;
+   * the writer encrypts them with this key (and trailer /Encrypt) on save.
+   */
+  encryptionKey?: Uint8Array;
 }

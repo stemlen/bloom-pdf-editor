@@ -68,7 +68,9 @@ export class TableCandidateDetector implements ITableCandidateDetector {
       const clusters = clusterLattice(nodes);
       for (const cluster of clusters) {
         if (cluster.nodeIds.length < 4) continue;
-        if (!hasMultiCellRows(cluster.nodeIds.map((id) => input.semantic.nodes[id]!))) continue;
+        const clusterNodes = cluster.nodeIds.map((id) => input.semantic.nodes[id]!);
+        if (!hasMultiCellRows(clusterNodes)) continue;
+        if (!hasAlignedColumns(clusterNodes)) continue;
         const hasVectorBorders = pageHasTableVectors(input, pageIndex, cluster.bbox);
         const score =
           0.4 +
@@ -207,6 +209,40 @@ function hasMultiCellRows(nodes: SemanticNode[]): boolean {
   }
   const multi = [...rows.values()].filter((c) => c >= 2).length;
   return multi >= 1 && multi * 2 >= rows.size;
+}
+
+/**
+ * Cells of a table line up with cells in other rows (by left edge, centre or
+ * right edge). "Label: value" lines don't: the labels line up but each value
+ * starts wherever its label ends, so they are paragraphs, not a table. Judged
+ * over the rows holding several cells, once there are enough of them (≥3) to
+ * tell; a spanning title row has no partner by design.
+ */
+function hasAlignedColumns(nodes: SemanticNode[]): boolean {
+  const tol = 4;
+  const cy = (n: SemanticNode) => n.bbox!.y + n.bbox!.height / 2;
+  const rows: SemanticNode[][] = [];
+  for (const n of nodes) {
+    const row = rows.find((r) => Math.abs(cy(r[0]!) - cy(n)) <= 4);
+    if (row) row.push(n);
+    else rows.push([n]);
+  }
+  const multi = rows.filter((r) => r.length >= 2);
+  if (multi.length < 3) return true;
+  const edges = (n: SemanticNode) => {
+    const b = n.bbox!;
+    return [b.x, b.x + b.width / 2, b.x + b.width];
+  };
+  const cells = multi.flat();
+  let aligned = 0;
+  for (const n of cells) {
+    const e = edges(n);
+    const match = nodes.some(
+      (m) => Math.abs(cy(m) - cy(n)) > 4 && edges(m).some((x, i) => Math.abs(x - e[i]!) <= tol),
+    );
+    if (match) aligned++;
+  }
+  return aligned >= cells.length * 0.75;
 }
 
 function centreInside(b: BoundingBox, outer: BoundingBox): boolean {

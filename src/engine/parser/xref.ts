@@ -334,6 +334,129 @@ export async function buildFullXref(data: Uint8Array): Promise<XRefTable> {
   return { entries: mergedEntries, trailerDict: mainTrailer };
 }
 
+// ─── Recovery for damaged files ─────────────────────────────────────────────
+
+const TRAILER_KEYS = ['Root', 'Info', 'ID', 'Encrypt'] as const;
+
+function bytesToLatin1(data: Uint8Array): string {
+  let out = '';
+  for (let i = 0; i < data.length; i += 0x8000) {
+    out += String.fromCharCode.apply(null, Array.from(data.subarray(i, i + 0x8000)));
+  }
+  return out;
+}
+
+/** Parses "N G obj <<...>> [stream]" at `offset`; null if it isn't one. */
+function readObjectAt(data: Uint8Array, offset: number): PDFObject | null {
+  try {
+    const lexer = new PDFLexer(data, offset);
+    lexer.nextToken();
+    lexer.nextToken();
+    const kw = lexer.nextToken();
+    if (!kw || kw.value !== 'obj') return null;
+    return parseStreamObject(lexer, data);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Rebuild the cross-reference table of a damaged file (missing or misspelled
+ * startxref, corrupt xref table, wrong offsets) by scanning for "N G obj"
+ * headers, as other readers do. A later definition of an object wins. Objects
+ * inside object streams are indexed too. The trailer is the last `trailer`
+ * dictionary with a /Root, else a cross-reference stream's dictionary, else
+ * one pointing /Root at the scanned /Catalog (or with no /Root when the
+ * catalog sits in an object stream; parsePDF then finds it).
+ */
+export async function reconstructXref(data: Uint8Array): Promise<XRefTable> {
+  const text = bytesToLatin1(data);
+  const entries = new Map<string, XRefEntry>();
+  const keyByNum = new Map<number, string>();
+  const objHeader = /(\d{1,10})[ \t\r\n\f\0]+(\d{1,5})[ \t\r\n\f\0]+obj\b/g;
+  for (let m = objHeader.exec(text); m; m = objHeader.exec(text)) {
+    const before = m.index > 0 ? text.charCodeAt(m.index - 1) : 0x0a;
+    if (before >= 0x30 && before <= 0x39) continue; // inside a longer number
+    const objNum = parseInt(m[1], 10);
+    const genNum = parseInt(m[2], 10);
+    const key = `${objNum}_${genNum}`;
+    // Drop an earlier definition of the same object number with another generation.
+    const prev = keyByNum.get(objNum);
+    if (prev && prev !== key) entries.delete(prev);
+    keyByNum.set(objNum, key);
+    entries.set(key, { objNum, genNum, offset: m.index, type: 'n' });
+  }
+  if (entries.size === 0) throw new Error('No PDF objects found — file may be corrupted or not a PDF');
+
+  let trailer: PDFDict | null = null;
+  for (let pos = text.lastIndexOf('trailer'); pos !== -1 && !trailer; pos = text.lastIndexOf('trailer', pos - 1)) {
+    try {
+      const lexer = new PDFLexer(data, pos + 'trailer'.length);
+      const dict = parseObject(lexer);
+      if (dict instanceof PDFDict && dict.get('Root') instanceof PDFRef) trailer = dict;
+    } catch {
+      // keep looking
+    }
+    if (pos === 0) break;
+  }
+
+  let catalogRef: PDFRef | null = null;
+  const direct = Array.from(entries.values());
+  for (const entry of direct) {
+    const obj = readObjectAt(data, entry.offset);
+    const dict = obj instanceof PDFStream ? obj.dict : obj instanceof PDFDict ? obj : null;
+    if (!dict) continue;
+    const type = dict.getName('Type');
+    if (type === 'Catalog') catalogRef = new PDFRef(entry.objNum, entry.genNum);
+    if (!trailer && type === 'XRef' && dict.get('Root') instanceof PDFRef) {
+      trailer = new PDFDict();
+      for (const k of TRAILER_KEYS) {
+        const v = dict.get(k);
+        if (v) trailer.set(k, v);
+      }
+    }
+    if (type === 'ObjStm' && obj instanceof PDFStream) {
+      try {
+        const filters = obj.getFilters();
+        const body = filters.length > 0 ? await applyFilters(obj.rawBytes, filters, obj.getDecodeParams()) : obj.rawBytes;
+        const header = new PDFLexer(body, 0);
+        const n = dict.getNumber('N') ?? 0;
+        for (let i = 0; i < n; i++) {
+          const num = header.nextToken();
+          const off = header.nextToken();
+          if (num?.type !== TokenType.Integer || off?.type !== TokenType.Integer) break;
+          const key = `${num.value as number}_0`;
+          // An object written directly in the file supersedes the packed copy.
+          if (entries.has(key)) continue;
+          entries.set(key, {
+            objNum: num.value as number,
+            genNum: 0,
+            offset: 0,
+            type: 'n',
+            compressedObjNum: entry.objNum,
+            compressedIndex: i,
+          });
+        }
+      } catch {
+        // An unreadable object stream only loses the objects inside it.
+      }
+    }
+  }
+
+  if (!trailer || !entries.has((trailer.get('Root') as PDFRef).toKey())) {
+    // Without a usable /Root here, the parser looks for the catalog among all
+    // objects, including those packed in object streams.
+    const rebuilt = new PDFDict();
+    if (trailer) for (const k of TRAILER_KEYS) {
+      const v = trailer.get(k);
+      if (v && k !== 'Root') rebuilt.set(k, v);
+    }
+    if (catalogRef) rebuilt.set('Root', catalogRef);
+    trailer = rebuilt;
+  }
+  return { entries, trailerDict: trailer };
+}
+
 /**
  * Check if the data at the given offset starts a traditional xref table
  * (starts with "xref" keyword) vs an xref stream (starts with object definition).

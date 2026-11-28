@@ -43,14 +43,16 @@ export class SvgExporter {
       }
 
       for (const n of Object.values(udm.semantic.nodes)) {
-        if (n.pageIndex !== pi || !n.bbox || n.type === 'list_item' || n.type === 'table') continue;
+        // A list has no text of its own: its items are drawn, each at its own place.
+        if (n.pageIndex !== pi || !n.bbox || n.type === 'list' || n.type === 'table') continue;
         if (!('text' in n) || !n.text) continue;
+        const text = n.type === 'list_item' && n.marker ? `${n.marker} ${n.text}` : String(n.text);
         const heading = n.type === 'heading' || n.type === 'title' || n.type === 'subtitle';
         const runSize =
           'runs' in n && Array.isArray(n.runs) ? n.runs.find((r) => r.fontSize)?.fontSize : undefined;
         const fs = runSize ?? (heading ? 16 : 12);
         parts.push(
-          textElement(String(n.text), n.bbox, fs, height, heading ? ' font-weight="bold"' : ''),
+          textElement(text, n.bbox, fs, height, heading ? ' font-weight="bold"' : ''),
         );
       }
 

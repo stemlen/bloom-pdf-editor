@@ -38,13 +38,14 @@ export function buildSlideXml(
     .sort((a, b) => a.readingOrderIndex - b.readingOrderIndex);
 
   for (const n of nodes) {
-    if (n.type === 'list_item') continue;
     if (n.type === 'image') {
       const alt = 'alt' in n ? String(n.alt ?? 'Image') : 'Image';
       parts.push(textBoxSp(`[Image: ${alt}]`, toSlide(n.bbox!), { fontSizePt: 12, name: 'Image' }));
       continue;
     }
     if (!('text' in n) || !n.text?.trim()) continue;
+    // A list has no text of its own; each item gets a box at its own place.
+    const text = n.type === 'list_item' && n.marker ? `${n.marker} ${n.text}` : String(n.text);
     const bold = n.type === 'heading' || n.type === 'title' || n.type === 'subtitle';
     const runSize = 'runs' in n && Array.isArray(n.runs) ? n.runs.find((r) => r.fontSize)?.fontSize : undefined;
     const fontSize =
@@ -59,7 +60,7 @@ export function buildSlideXml(
       height: Math.max(box.height, fontSize * 1.25),
     };
     parts.push(
-      textBoxSp(String(n.text), fitted, {
+      textBoxSp(text, fitted, {
         bold,
         fontSizePt: fontSize,
         name: n.type,

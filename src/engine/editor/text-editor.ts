@@ -31,10 +31,17 @@ import {
   type PDFPageInfo,
 } from '../types';
 import { resolveRef } from '../parser/parser';
-import { loadFont, type FontData, charCodeToUnicode } from '../fonts/font-parser';
+import { loadFont, loadPageFonts, type FontData, charCodeToUnicode } from '../fonts/font-parser';
 import { ensureFallbackFont } from '../fonts/font-augmentation';
-import { resolveRunStyleFlags } from '../flow/metrics';
+import { resolveRunStyleFlags, computeBaseline } from '../flow/metrics';
 import { serializeToString } from './stream-compiler';
+import { findTextMatches, replaceInChainRuns, type TextChain, type TextMatch } from './text-search';
+import {
+  buildClusterInventory,
+  encodeTextFromClusters,
+  hasComplexScriptText,
+  type ClusterInventory,
+} from './indic-cluster-encoder';
 
 /** Visual size for Tf when switching to the Helvetica fallback. */
 function runFontSize(run: TextRun): number {
@@ -97,6 +104,11 @@ export function applyTextEdits(
   const missingCharCodes: number[] = [];
   let indexOffset = 0;
 
+  // Glyph clusters already drawn on the page (for shaped scripts), built once.
+  let pageRuns: TextRun[] | null = null;
+  let clusterInventory: ClusterInventory | null = null;
+  let pageFonts: Map<string, FontData> | null = null;
+
   // Apply each edit
   for (const edit of edits) {
     // Unchanged runs must not be rewritten — re-encoding through Helvetica
@@ -108,10 +120,30 @@ export function applyTextEdits(
     // Load font data for encoding
     const fontData = loadFontForRun(edit.targetRun, page, objects);
 
+    // Devanagari & co. are shaped: rebuild the text from glyph clusters the
+    // page already draws (exact fonts, conjuncts and matra placement) rather
+    // than char-by-char codes, which subset/Type3 fonts can't express.
+    let clusterOps: CSInstruction[] | null = null;
+    if (hasComplexScriptText(edit.newText) && (edit.targetRun.sourceInstructionIndices ?? []).length > 0) {
+      if (!pageRuns) pageRuns = interpretPage(contentBytes, page, objects).textRuns;
+      clusterInventory ??= buildClusterInventory(pageRuns);
+      pageFonts ??= loadPageFonts(page.resources, objects);
+      const baseline = computeBaseline(edit.targetRun);
+      const tol = Math.max(1, (edit.targetRun.glyphs[0]?.fontSize ?? edit.targetRun.fontSize) * 0.3);
+      clusterOps = encodeTextFromClusters(edit.newText, clusterInventory, {
+        fontSize: edit.targetRun.fontSize,
+        matrix: edit.targetRun.textMatrix,
+        fonts: pageFonts,
+        preferredFonts: new Set(
+          pageRuns.filter(r => Math.abs(computeBaseline(r) - baseline) <= tol).map(r => r.fontName),
+        ),
+      });
+    }
+
     // Encode with the run's font; subset/CID fonts often can't encode typed ASCII (`.` → missing/`?`)
     let encoded = encodeTextForFont(edit.newText, fontData);
     let useFallbackFont: string | null = null;
-    const lossy = isEncodingLossy(edit.newText, encoded, fontData);
+    const lossy = !clusterOps && isEncodingLossy(edit.newText, encoded, fontData);
 
     if (lossy) {
       // Keep bold/italic of the source run — HelvAug (regular) was stripping
@@ -123,7 +155,7 @@ export function applyTextEdits(
       if (encoded.missing.length > 0) {
         missingCharCodes.push(...encoded.missing);
       }
-    } else if (encoded.missing.length > 0) {
+    } else if (!clusterOps && encoded.missing.length > 0) {
       needsFontAugmentation = true;
       missingCharCodes.push(...encoded.missing);
     }
@@ -143,6 +175,11 @@ export function applyTextEdits(
     }
 
     const sourceInstructionIndices = rawIndices.map(i => i + indexOffset);
+
+    if (clusterOps) {
+      indexOffset += applyClusterTextEdit(instructions, sourceInstructionIndices, clusterOps);
+      continue;
+    }
 
     if (sourceInstructionIndices.length > 1) {
       const wrote = applyGroupedTextEdit(
@@ -190,6 +227,9 @@ export function applyTextEdits(
       console.warn('[TextEditor] Could not match text run to instruction');
       continue;
     }
+
+    // The old /ActualText around this operator would mask the new text.
+    dropEnclosingActualText(instructions, matched.index);
 
     // Spaces: subset fonts often have ~0 space advance (live CSS shows gaps,
     // PDF does not). Emit TJ with explicit advances instead of a bare string.
@@ -247,6 +287,8 @@ export function applyRunPositionShifts(
     merged.set(s.run, prev);
   }
 
+  // dx/dy stay in page space here; each write converts them into its operator's
+  // space (toOperandSpace), since Chromium output scales and flips text space.
   type ShiftItem = { textIndex: number; dx: number; dy: number; run: TextRun };
   const items: ShiftItem[] = [];
   merged.forEach((delta, run) => {
@@ -320,9 +362,10 @@ export function applyRunPositionShifts(
   };
 
   const injectLocalTd = (textIndex: number, dx: number, dy: number) => {
+    const [tdx, tdy] = toOperandSpace(dx, dy, textSpaceLinearAt(instructions, textIndex));
     instructions.splice(textIndex, 0, {
       operator: 'Td',
-      operands: [new PDFNumber(dx), new PDFNumber(dy)],
+      operands: [new PDFNumber(tdx), new PDFNumber(tdy)],
       offset: 0,
     });
     bumpIndicesFrom(textIndex, 1);
@@ -395,9 +438,14 @@ export function applyRunPositionShifts(
     }
 
     const inst = instructions[pos.index];
+    // Shifts are in page space; operands are in the space of the CTM (Tm, and
+    // the CTM before a cm) or of the text matrix (Td). Chrome/Skia pages run
+    // under a scaled, y-flipped CTM, where raw deltas moved trailing text too
+    // little (and the wrong way vertically), leaving it under grown text.
     if ((pos.kind === 'Tm' || pos.kind === 'cm') && inst.operands.length >= 6) {
-      inst.operands[4] = new PDFNumber(numVal(inst.operands[4]) + remainDx);
-      inst.operands[5] = new PDFNumber(numVal(inst.operands[5]) + remainDy);
+      const [ox, oy] = toOperandSpace(remainDx, remainDy, ctmLinearAt(instructions, pos.index));
+      inst.operands[4] = new PDFNumber(numVal(inst.operands[4]) + ox);
+      inst.operands[5] = new PDFNumber(numVal(inst.operands[5]) + oy);
       appliedToOp.set(pos.index, {
         dx: already.dx + remainDx,
         dy: already.dy + remainDy,
@@ -414,8 +462,9 @@ export function applyRunPositionShifts(
         continue;
       }
       if (inst.operands.length >= 2) {
-        inst.operands[0] = new PDFNumber(numVal(inst.operands[0]) + needDx);
-        inst.operands[1] = new PDFNumber(numVal(inst.operands[1]) + needDy);
+        const [ox, oy] = toOperandSpace(needDx, needDy, textSpaceLinearAt(instructions, pos.index));
+        inst.operands[0] = new PDFNumber(numVal(inst.operands[0]) + ox);
+        inst.operands[1] = new PDFNumber(numVal(inst.operands[1]) + oy);
       }
       if (bt >= 0) {
         localTdByBt.set(bt, { dx: prevLocal.dx + needDx, dy: prevLocal.dy + needDy });
@@ -437,6 +486,52 @@ export function applyRunPositionShifts(
   }
 
   return compileInstructions(instructions);
+}
+
+type Linear = [number, number, number, number];
+const IDENTITY_LINEAR: Linear = [1, 0, 0, 1];
+const mulLinear = (m: Linear, n: Linear): Linear => [
+  m[0] * n[0] + m[1] * n[2], m[0] * n[1] + m[1] * n[3],
+  m[2] * n[0] + m[3] * n[2], m[2] * n[1] + m[3] * n[3],
+];
+
+/** Linear part of the CTM in effect just before instruction `index`. */
+function ctmLinearAt(instructions: CSInstruction[], index: number): Linear {
+  let m = IDENTITY_LINEAR;
+  const stack: Linear[] = [];
+  for (let i = 0; i < index && i < instructions.length; i++) {
+    const { operator, operands } = instructions[i];
+    if (operator === 'q') stack.push(m);
+    else if (operator === 'Q') m = stack.pop() ?? IDENTITY_LINEAR;
+    else if (operator === 'cm' && operands.length >= 6) {
+      m = mulLinear(operands.slice(0, 4).map(numVal) as Linear, m);
+    }
+  }
+  return m;
+}
+
+/**
+ * Linear map from text space (Td operands) to page space just before
+ * `index`: the last Tm in the text object (identity at BT) times the CTM.
+ */
+function textSpaceLinearAt(instructions: CSInstruction[], index: number): Linear {
+  let tm = IDENTITY_LINEAR;
+  for (let i = Math.min(index, instructions.length) - 1; i >= 0; i--) {
+    const { operator, operands } = instructions[i];
+    if (operator === 'BT') break;
+    if (operator === 'Tm' && operands.length >= 6) {
+      tm = operands.slice(0, 4).map(numVal) as Linear;
+      break;
+    }
+  }
+  return mulLinear(tm, ctmLinearAt(instructions, index));
+}
+
+/** Page-space delta → operand-space delta for a row-vector map `m` (page = v × m). */
+function toOperandSpace(dx: number, dy: number, m: Linear): [number, number] {
+  const det = m[0] * m[3] - m[1] * m[2];
+  if (Math.abs(det) < 1e-9) return [dx, dy];
+  return [(dx * m[3] - dy * m[2]) / det, (dy * m[0] - dx * m[1]) / det];
 }
 
 function findTextPositionInstruction(
@@ -1185,17 +1280,17 @@ function insertEraseRectForRun(
   const eraseX = run.x - pad;
   const eraseY = run.y - descent - pad;
 
+  // The rectangle is in page space, but it's painted under whatever CTM is in
+  // effect at the BT (Chromium output runs under a scaled, flipped CTM): map
+  // it into that user space, or it lands — and erases — somewhere else.
+  const rect = pageRectToUserSpace(instructions, btIndex, eraseX, eraseY, eraseWidth, eraseHeight);
+
   const eraseOps: CSInstruction[] = [
     { operator: 'q', operands: [], offset: 0 },
     { operator: 'rg', operands: [new PDFNumber(1), new PDFNumber(1), new PDFNumber(1)], offset: 0 },
     {
       operator: 're',
-      operands: [
-        new PDFNumber(eraseX),
-        new PDFNumber(eraseY),
-        new PDFNumber(eraseWidth),
-        new PDFNumber(eraseHeight),
-      ],
+      operands: rect.map(v => new PDFNumber(v)),
       offset: 0,
     },
     { operator: 'f', operands: [], offset: 0 },
@@ -1204,6 +1299,121 @@ function insertEraseRectForRun(
 
   instructions.splice(btIndex, 0, ...eraseOps);
   return eraseOps.length;
+}
+
+// ─── Marked content & cluster edits ─────────────────────────────────────────
+
+/**
+ * Strip /ActualText from the marked-content span enclosing `index`: it names
+ * the text that used to be drawn there and would override the new glyphs in
+ * every reader that honours it (Chromium wraps each Hindi cluster in one).
+ */
+function dropEnclosingActualText(instructions: CSInstruction[], index: number): void {
+  let depth = 0;
+  for (let i = index - 1; i >= 0; i--) {
+    const operator = instructions[i].operator;
+    if (operator === 'EMC') depth++;
+    else if (operator === 'BMC' || operator === 'BDC') {
+      if (depth > 0) {
+        depth--;
+        continue;
+      }
+      const props = instructions[i].operands[1];
+      if (operator === 'BDC' && props instanceof PDFDict && props.has('ActualText')) {
+        instructions[i].operands = [instructions[i].operands[0], new PDFDict()];
+      }
+      return;
+    }
+  }
+}
+
+/**
+ * Replace a run's text with cluster glyph operators (indic-cluster-encoder):
+ * they go where the run's first show operator was, its other show operators
+ * are emptied, and the font in effect before is restored afterwards.
+ * Returns the number of instructions inserted.
+ */
+function applyClusterTextEdit(
+  instructions: CSInstruction[],
+  sourceIndices: number[],
+  ops: CSInstruction[],
+): number {
+  const sorted = Array.from(new Set(sourceIndices)).sort((a, b) => a - b)
+    .filter(i => instructions[i] && isTextShowingOperator(instructions[i].operator));
+  if (sorted.length === 0) return 0;
+  const primaryIdx = sorted[0];
+
+  const empty = new PDFString('');
+  for (const idx of sorted.slice(1)) {
+    const inst = instructions[idx];
+    inst.operands = inst.operator === 'TJ' ? [new PDFArray([empty])] : inst.operator === '"' ? [...inst.operands.slice(0, 2), empty] : [empty];
+  }
+  dropEnclosingActualText(instructions, primaryIdx);
+
+  let prevFont: CSInstruction | null = null;
+  for (let i = primaryIdx - 1; i >= 0; i--) {
+    if (instructions[i].operator === 'BT') break;
+    if (instructions[i].operator === 'Tf' && instructions[i].operands.length >= 2) {
+      prevFont = instructions[i];
+      break;
+    }
+  }
+
+  const primary = instructions[primaryIdx];
+  // ' and " also move to the next line first; keep that part.
+  const lead: CSInstruction[] = primary.operator === "'" ? [{ operator: 'T*', operands: [], offset: 0 }]
+    : primary.operator === '"'
+      ? [
+        { operator: 'Tw', operands: [primary.operands[0]], offset: 0 },
+        { operator: 'Tc', operands: [primary.operands[1]], offset: 0 },
+        { operator: 'T*', operands: [], offset: 0 },
+      ]
+      : [];
+  const restore = prevFont ? [{ operator: 'Tf', operands: [...prevFont.operands], offset: 0 }] : [];
+  const replacement = [...lead, ...ops, ...restore];
+  instructions.splice(primaryIdx, 1, ...replacement);
+  return replacement.length - 1;
+}
+
+/**
+ * Axis-aligned page-space rectangle → [x, y, w, h] in the user space of the CTM
+ * in effect just before instructions[index] (walks q/Q/cm from the start).
+ */
+function pageRectToUserSpace(
+  instructions: CSInstruction[],
+  index: number,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+): [number, number, number, number] {
+  type M = [number, number, number, number, number, number];
+  let ctm: M = [1, 0, 0, 1, 0, 0];
+  const stack: M[] = [];
+  for (let i = 0; i < index && i < instructions.length; i++) {
+    const { operator, operands } = instructions[i];
+    if (operator === 'q') stack.push(ctm);
+    else if (operator === 'Q') ctm = stack.pop() ?? ctm;
+    else if (operator === 'cm' && operands.length === 6) {
+      const [a, b, c, d, e, f] = operands.map(o => (o instanceof PDFNumber ? o.value : 0));
+      const [A, B, C, D, E, F] = ctm;
+      ctm = [a * A + b * C, a * B + b * D, c * A + d * C, c * B + d * D, e * A + f * C + E, e * B + f * D + F];
+    }
+  }
+  const [a, b, c, d, e, f] = ctm;
+  const det = a * d - b * c;
+  if (Math.abs(det) < 1e-12 || (a === 1 && b === 0 && c === 0 && d === 1 && e === 0 && f === 0)) return [x, y, w, h];
+  const toUser = (px: number, py: number) => {
+    const dx = px - e;
+    const dy = py - f;
+    return [(dx * d - dy * c) / det, (dy * a - dx * b) / det];
+  };
+  const pts = [toUser(x, y), toUser(x + w, y), toUser(x, y + h), toUser(x + w, y + h)];
+  const xs = pts.map(p => p[0]);
+  const ys = pts.map(p => p[1]);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  return [minX, minY, Math.max(...xs) - minX, Math.max(...ys) - minY];
 }
 
 // ─── Grouped text edit (multi-instruction spans) ────────────────────────────
@@ -1241,6 +1451,7 @@ function applyGroupedTextEdit(
   const empty = new PDFString('');
   const primary = instructions[primaryIdx];
   applyEncodedShowingOperands(primary, newText, encoded, fontData, !!fallbackFont);
+  dropEnclosingActualText(instructions, primaryIdx);
 
   for (let i = 0; i < sortedIndices.length; i++) {
     const idx = sortedIndices[i];
@@ -1528,8 +1739,8 @@ export function findTextInPage(
 /**
  * Find and replace text in a page's content stream.
  *
- * @param occurrence When set, replace only that match (0-based, counted across
- *   the page's text runs in reading order); otherwise replace every match.
+ * @param occurrence When set, replace only that match (0-based, in the order
+ *   `findTextMatches` lists the page's matches); otherwise replace every match.
  */
 export function findAndReplace(
   contentBytes: Uint8Array,
@@ -1540,41 +1751,24 @@ export function findAndReplace(
   caseSensitive: boolean = false,
   occurrence?: number,
 ): EditResult {
-  const matchingRuns = findTextInPage(contentBytes, page, objects, searchText, caseSensitive);
-
+  const unchanged: EditResult = { newContentBytes: contentBytes, needsFontAugmentation: false, missingCharCodes: [] };
+  const runs = interpretPage(contentBytes, page, objects).textRuns;
+  let matches = findTextMatches(runs, searchText, caseSensitive);
   if (occurrence !== undefined) {
-    const needle = caseSensitive ? searchText : searchText.toLowerCase();
-    let seen = 0;
-    for (const run of matchingRuns) {
-      const hay = caseSensitive ? run.text : run.text.toLowerCase();
-      let idx = 0;
-      while ((idx = hay.indexOf(needle, idx)) !== -1) {
-        if (seen === occurrence) {
-          const newText = run.text.slice(0, idx) + replaceText + run.text.slice(idx + searchText.length);
-          return applyTextEdits(contentBytes, page, objects, [{ targetRun: run, newText }]);
-        }
-        seen++;
-        idx += Math.max(needle.length, 1);
-      }
-    }
-    return { newContentBytes: contentBytes, needsFontAugmentation: false, missingCharCodes: [] };
+    const one = matches[occurrence];
+    if (!one) return unchanged;
+    matches = [one];
   }
 
-  const edits: TextEdit[] = matchingRuns.map((run) => {
-    let newText: string;
-    if (caseSensitive) {
-      newText = run.text.split(searchText).join(replaceText);
-    } else {
-      // Case-insensitive replace
-      const regex = new RegExp(escapeRegex(searchText), 'gi');
-      newText = run.text.replace(regex, replaceText);
+  // A match may span several runs (see text-search.ts); edit every run it touches.
+  const byChain = new Map<TextChain, TextMatch[]>();
+  for (const m of matches) byChain.set(m.chain, [...(byChain.get(m.chain) ?? []), m]);
+  const edits: TextEdit[] = [];
+  for (const [chain, chainMatches] of byChain) {
+    for (const { run, newText } of replaceInChainRuns(chain, chainMatches, replaceText)) {
+      edits.push({ targetRun: run, newText });
     }
-    return { targetRun: run, newText };
-  });
-
+  }
+  if (edits.length === 0) return unchanged;
   return applyTextEdits(contentBytes, page, objects, edits);
-}
-
-function escapeRegex(str: string): string {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }

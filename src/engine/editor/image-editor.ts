@@ -3,6 +3,7 @@ import type { PDFDocumentData, PDFPageInfo, PDFObject } from '../types';
 import type { ImageItem } from '../content/interpreter';
 import { getResource } from '../parser/parser';
 import { flateEncode } from '../parser/filters';
+import { concatBytes, isolateGraphicsState } from './stream-compiler';
 
 export interface InsertImageOptions {
   /**
@@ -192,9 +193,8 @@ export async function insertImageRun(
   const enc = new TextEncoder();
   const injectionBytes = enc.encode(injection);
 
-  const newContentBytes = new Uint8Array(contentBytes.length + injectionBytes.length);
-  newContentBytes.set(contentBytes);
-  newContentBytes.set(injectionBytes, contentBytes.length);
+  // Draw in the page's default user space, whatever state the content left.
+  const newContentBytes = concatBytes(isolateGraphicsState(contentBytes), injectionBytes);
 
   return { newContentBytes };
 }

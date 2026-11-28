@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 import { inflateSync } from "node:zlib";
 import { PDFArray, PDFDict, PDFName, PDFRawStream, PDFRef } from "pdf-lib";
-import { downloadPdf, openInEditor, pdfDoc, pdfPoint, pdfText, trackErrors } from "./helpers";
+import { downloadPdf, editLine, openInEditor, pdfDoc, pdfPoint, pdfText, trackErrors } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   page.on("dialog", (d) => d.accept());
@@ -97,4 +97,57 @@ test("bulleted list and existing-line limits", async ({ page }) => {
   const { bytes } = await downloadPdf(page);
   const { out } = await pageOneContent(bytes);
   expect(out.match(/\(\\225\) Tj/g)?.length).toBe(2); // WinAnsi bullet
+});
+
+test("text boxes are in the undo history: add, type, move, delete", async ({ page }) => {
+  await openInEditor(page);
+  const undo = page.getByRole("button", { name: "Undo" });
+  const redo = page.getByRole("button", { name: "Redo" });
+  const boxes = page.getByTestId("text-box");
+  const input = await addBox(page, 300, 300);
+  await input.fill("Undo me");
+  await page.getByTestId("page-canvas").click({ position: { x: 20, y: 20 } }); // leave the box
+  await expect(page.getByTestId("text-box-preview")).toBeVisible();
+
+  // Move it, then undo the move.
+  const before = (await boxes.first().boundingBox())!;
+  await page.mouse.move(before.x + 4, before.y + 4);
+  await page.mouse.down();
+  await page.mouse.move(before.x + 84, before.y + 64, { steps: 6 });
+  await page.mouse.up();
+  await expect.poll(async () => (await boxes.first().boundingBox())!.x).toBeGreaterThan(before.x + 60);
+  await page.getByTestId("page-canvas").click({ position: { x: 20, y: 20 } });
+  await undo.click();
+  await expect.poll(async () => Math.round((await boxes.first().boundingBox())!.x)).toBe(Math.round(before.x));
+
+  // Undo the typing, then the box itself; redo brings both back.
+  await undo.click();
+  await expect(page.getByTestId("text-box-preview")).not.toContainText("Undo me");
+  await undo.click();
+  await expect(boxes).toHaveCount(0);
+  await redo.click();
+  await redo.click();
+  await expect(page.getByTestId("text-box-preview")).toContainText("Undo me");
+
+  // Delete with the box's × and undo it.
+  await boxes.first().click();
+  await page.getByRole("button", { name: "Delete text box" }).click();
+  await expect(boxes).toHaveCount(0);
+  await undo.click();
+  await expect(boxes).toHaveCount(1);
+});
+
+test("undoing a line edit keeps a text box added before it", async ({ page }) => {
+  await openInEditor(page);
+  const input = await addBox(page, 300, 300);
+  await input.fill("Keep this box");
+  // Edit an existing line (clicking it also leaves the box).
+  await editLine(page, await pdfPoint(page, 120, 670), "Contact: undo@bloompdf.app");
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByTestId("text-box")).toHaveCount(1);
+  const { bytes } = await downloadPdf(page);
+  const text = await pdfText(bytes);
+  expect(text).toContain("Keep this box");
+  expect(text).toContain("hello@bloompdf.app");
+  expect(text).not.toContain("undo@bloompdf.app");
 });

@@ -41,9 +41,18 @@ function tryBorderedGrid(
   if (!page) return null;
 
   const lines: GridLine[] = [];
+  const area = expand(candidate.bbox, 4);
   for (const v of page.vectors) {
-    if (!intersects(v.bbox, expand(candidate.bbox, 4))) continue;
-    lines.push(...vectorToLines(v));
+    if (!intersects(v.bbox, area)) continue;
+    // Only edges that lie within the table count: a page-sized background or
+    // frame rectangle around it would otherwise add empty outer rows/columns.
+    for (const line of vectorToLines(v)) {
+      const inside =
+        line.orientation === 'v'
+          ? line.position >= area.x && line.position <= area.x + area.width
+          : line.position >= area.y && line.position <= area.y + area.height;
+      if (inside) lines.push(line);
+    }
   }
 
   if (lines.length < 2) return null;

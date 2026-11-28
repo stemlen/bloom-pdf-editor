@@ -23,6 +23,8 @@ import {
   PDFString,
 } from '../types';
 import { flateEncode } from '../parser/filters';
+import { parseContentStream } from '../content/operator-lexer';
+import { analyzeStateLeak, appendIsolatedContent } from '../content/append-isolation';
 
 // ─── Content stream compilation ─────────────────────────────────────────────
 
@@ -257,6 +259,22 @@ function stringToBytes(str: string): Uint8Array {
     bytes[i] = str.charCodeAt(i) & 0xff;
   }
   return bytes;
+}
+
+/** Operators that change the graphics (or text) state and outlive their stream. */
+
+/**
+ * Make existing page content safe to append to: when it leaves the graphics
+ * state changed (a top-level `cm`, as Chromium/Skia PDFs start with
+ * `.24 0 0 -.24 0 842 cm`, a colour, a clip, or unbalanced q/Q), wrap it in
+ * q … Q so that whatever is drawn after it starts from the page's default
+ * user space. Content that already ends in the default state is returned
+ * unchanged, so repeated appends don't pile up nesting levels.
+ */
+export function isolateGraphicsState(content: Uint8Array): Uint8Array {
+  if (content.length === 0) return content;
+  if (!analyzeStateLeak(parseContentStream(content)).leaks) return content;
+  return appendIsolatedContent(content, new Uint8Array(0));
 }
 
 export function concatBytes(...arrays: Uint8Array[]): Uint8Array {

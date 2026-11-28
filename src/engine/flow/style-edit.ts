@@ -38,6 +38,7 @@ import {
 import { ensureFallbackFont } from '../fonts/font-augmentation';
 import { updatePageContent } from '../editor/stream-compiler';
 import { parseContentStream, type CSInstruction } from '../content/operator-lexer';
+import { isolateInstructionsForAppend } from '../content/append-isolation';
 import { interpretPage } from '../content/interpreter';
 import { reconstructLines } from './line-reconstruction';
 import type { TextLine, StyledSegment } from './types';
@@ -1565,8 +1566,9 @@ export function duplicateLineBelow(
     );
   }
 
-  instructions.push(...clones);
-  return compileInstructions(instructions);
+  // Copies carry their own absolute CTM, so they must start from the default
+  // state, not one the page's content leaves behind (e.g. Chrome's flip).
+  return compileInstructions([...isolateInstructionsForAppend(instructions), ...clones]);
 }
 
 /**
@@ -1700,15 +1702,21 @@ export const NEW_COLUMN_PLACEHOLDER = 'New';
 /**
  * Add a column to the right of a table: one placeholder cell per row, all
  * left-aligned on the same x after the widest row, on each row's baseline.
+ * With `page`/`objects`, the placeholder is encoded for the row's font (or
+ * Helvetica when that subset font can't show it) instead of raw bytes, which
+ * drew the wrong glyphs in subset / custom-encoded fonts.
  */
 export function insertTableColumnRight(
   contentBytes: Uint8Array,
   rowLines: TextLine[][],
+  page?: PDFPageInfo,
+  objects?: Map<string, PDFObject>,
 ): Uint8Array {
   const rows = rowLines.filter(r => r.length > 0);
   if (rows.length === 0) return contentBytes;
   const tableRight = Math.max(...rows.flat().map(l => l.rightEdge));
   const instructions = parseContentStream(contentBytes);
+  const added: CSInstruction[] = [];
   for (const row of rows) {
     const rightmost = [...row].sort((a, b) => b.rightEdge - a.rightEdge)[0];
     const run = rightmost.runs[0];
@@ -1717,22 +1725,31 @@ export function insertTableColumnRight(
     const x = tableRight + Math.max(fs * 1.5, 12);
     const y = rightmost.baseline;
     const color = run.fillColor ?? [0, 0, 0];
-    instructions.push(
+    let fontKey = run.fontName.replace(/^\//, '');
+    let text: PDFObject = new PDFString(NEW_COLUMN_PLACEHOLDER);
+    if (page && objects) {
+      const piece = encodePieceForStyle(NEW_COLUMN_PLACEHOLDER, loadFontForName(run.fontName, page, objects), page, objects);
+      text = piece.encoded.pdfString;
+      if (piece.fontKey) fontKey = piece.fontKey;
+    }
+    added.push(
       op('q'),
       op('BT'),
       op('rg', [new PDFNumber(color[0]), new PDFNumber(color[1]), new PDFNumber(color[2])]),
-      op('Tf', [new PDFName(run.fontName.replace(/^\//, '')), new PDFNumber(run.fontSize || fs)]),
+      // Drawn in default user space, so use the size as seen on the page,
+      // not the Tf operand (which a scaled Tm or CTM multiplies).
+      op('Tf', [new PDFName(fontKey), new PDFNumber(fs)]),
       op('Tm', [
         new PDFNumber(1), new PDFNumber(0), new PDFNumber(0), new PDFNumber(1),
         new PDFNumber(x), new PDFNumber(y),
       ]),
       // A visible, editable placeholder: a blank cell gave no feedback at all.
-      op('Tj', [new PDFString(NEW_COLUMN_PLACEHOLDER)]),
+      op('Tj', [text]),
       op('ET'),
       op('Q'),
     );
   }
-  return compileInstructions(instructions);
+  return compileInstructions([...isolateInstructionsForAppend(instructions), ...added]);
 }
 
 /** Move the text objects of the given lines vertically by dy (user space). */
@@ -1802,14 +1819,24 @@ function cloneInstruction(inst: CSInstruction): CSInstruction {
   };
 }
 
+/**
+ * Move the body of a text object vertically. Tm is absolute, so every Tm
+ * moves; Td/TD are relative to the previous line position, so only one that
+ * comes before any Tm/Td (i.e. positions from the BT origin) moves. Shifting
+ * every Td added dy once per glyph group (Chrome/Skia write one Td per
+ * glyph) and scattered the copy down the page.
+ */
 function shiftInstructionsY(instructions: CSInstruction[], dy: number): void {
+  let positioned = false;
   for (const inst of instructions) {
     if (inst.operator === 'Tm' && inst.operands.length >= 6) {
       const f = inst.operands[5];
       if (f instanceof PDFNumber) inst.operands[5] = new PDFNumber(f.value + dy);
+      positioned = true;
     } else if ((inst.operator === 'Td' || inst.operator === 'TD') && inst.operands.length >= 2) {
       const y = inst.operands[1];
-      if (y instanceof PDFNumber) inst.operands[1] = new PDFNumber(y.value + dy);
+      if (!positioned && y instanceof PDFNumber) inst.operands[1] = new PDFNumber(y.value + dy);
+      positioned = true;
     } else if ((inst.operator === 'm' || inst.operator === 'l') && inst.operands.length >= 2) {
       const y = inst.operands[1];
       if (y instanceof PDFNumber) inst.operands[1] = new PDFNumber(y.value + dy);

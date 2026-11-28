@@ -132,7 +132,11 @@ export function getOverlayFontStyle(fontName: string, fontData?: FontData): {
   };
 }
 
-/** Convert a canvas CSS‐pixel mouse position to PDF user‐space coordinates. */
+/**
+ * Convert a canvas CSS‐pixel mouse position to PDF user‐space coordinates.
+ * `pageWidth`/`pageHeight` are the page as displayed; pass the page's
+ * /Rotate as `rotate` to undo the turn the renderer applies to the canvas.
+ */
 export function canvasToPdf(
   cssX: number,
   cssY: number,
@@ -141,11 +145,54 @@ export function canvasToPdf(
   pageHeight: number,
   mediaBoxX: number,
   mediaBoxY: number,
+  rotate = 0,
 ): { pdfX: number; pdfY: number } {
-  return {
-    pdfX: cssX / scale + mediaBoxX,
-    pdfY: (mediaBoxY + pageHeight) - cssY / scale,
-  };
+  const x = cssX / scale;
+  const y = cssY / scale;
+  switch (((rotate % 360) + 360) % 360) {
+    case 90:
+      return { pdfX: mediaBoxX + y, pdfY: mediaBoxY + x };
+    case 180:
+      return { pdfX: mediaBoxX + pageWidth - x, pdfY: mediaBoxY + y };
+    case 270:
+      return { pdfX: mediaBoxX + pageHeight - y, pdfY: mediaBoxY + pageWidth - x };
+    default:
+      return { pdfX: x + mediaBoxX, pdfY: (mediaBoxY + pageHeight) - y };
+  }
+}
+
+/**
+ * Placed images and signatures are positioned in the page as displayed (PDF
+ * points, origin bottom-left of the turned page). On a /Rotate page, move a
+ * box from that space into the page's own user space: returns its top-left
+ * for drawing at the same size, turned by `rotation` degrees clockwise so it
+ * still looks upright once the viewer applies /Rotate.
+ */
+export function displayBoxToPage(
+  x: number,
+  yTop: number,
+  width: number,
+  height: number,
+  page: { mediaBox: { x: number; y: number; width: number; height: number }; rotate: number },
+  /**
+   * The height `yTop` is measured down from. Signatures use the displayed
+   * height (the default); floating images are laid out against the MediaBox
+   * height whatever the rotation, so they pass `page.mediaBox.height`.
+   */
+  yReferenceHeight?: number,
+): { x: number; yTop: number; rotation: number } {
+  const rotate = ((page.rotate % 360) + 360) % 360;
+  if (rotate === 0) return { x, yTop, rotation: 0 };
+  const { mediaBox: mb } = page;
+  const sideways = rotate === 90 || rotate === 270;
+  const dispW = sideways ? mb.height : mb.width;
+  const dispH = sideways ? mb.width : mb.height;
+  // Centre of the box in displayed canvas units (1 pt = 1 unit, origin top-left)…
+  const cx = x + width / 2 - mb.x;
+  const cy = mb.y + (yReferenceHeight ?? dispH) - (yTop - height / 2);
+  // …and in the page's user space.
+  const c = canvasToPdf(cx, cy, 1, dispW, dispH, mb.x, mb.y, rotate);
+  return { x: c.pdfX - width / 2, yTop: c.pdfY + height / 2, rotation: -rotate };
 }
 
 /** Convert PDF user‐space coordinates to canvas CSS pixels. */
@@ -160,6 +207,38 @@ export function pdfToCanvas(
   return {
     cssX: (pdfX - mediaBoxX) * scale,
     cssY: ((mediaBoxY + pageHeight) - pdfY) * scale,
+  };
+}
+
+/**
+ * CSS rectangle on the displayed page for a box given in unrotated page space (PDF units).
+ * The renderer turns /Rotate pages clockwise, so overlays must turn the same way.
+ */
+export function pdfBoxToCanvasRect(
+  box: { x: number; y: number; width: number; height: number },
+  page: { mediaBox: { x: number; y: number; width: number; height: number }; rotate: number },
+  scale: number,
+): { left: number; top: number; width: number; height: number } {
+  const { mediaBox } = page;
+  const rot = ((page.rotate % 360) + 360) % 360;
+  const dispW = (rot === 90 || rot === 270 ? mediaBox.height : mediaBox.width) * scale;
+  const dispH = (rot === 90 || rot === 270 ? mediaBox.width : mediaBox.height) * scale;
+  const corners = [
+    pdfToCanvas(box.x, box.y + box.height, scale, mediaBox.height, mediaBox.x, mediaBox.y),
+    pdfToCanvas(box.x + box.width, box.y, scale, mediaBox.height, mediaBox.x, mediaBox.y),
+  ].map(({ cssX: x, cssY: y }) => {
+    if (rot === 90) return { x: dispW - y, y: x };
+    if (rot === 180) return { x: dispW - x, y: dispH - y };
+    if (rot === 270) return { x: y, y: dispH - x };
+    return { x, y };
+  });
+  const left = Math.min(corners[0].x, corners[1].x);
+  const top = Math.min(corners[0].y, corners[1].y);
+  return {
+    left,
+    top,
+    width: Math.abs(corners[1].x - corners[0].x),
+    height: Math.abs(corners[1].y - corners[0].y),
   };
 }
 

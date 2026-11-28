@@ -10,8 +10,9 @@ import {
   type PDFDocumentData,
 } from '../types';
 import { getPageContentBytes, resolveRef } from '../parser/parser';
-import { updatePageContent, concatBytes } from './stream-compiler';
+import { updatePageContent, concatBytes, isolateGraphicsState } from './stream-compiler';
 import { serializeToString } from './stream-compiler';
+import { encodeWinAnsi, measureTextBoxString } from './text-box';
 
 export interface InvisibleWord {
   text: string;
@@ -37,6 +38,7 @@ function ensureHelv(page: PDFDocumentData['pages'][0], objects: PDFDocumentData[
     helvetica.set('Type', new PDFName('Font'));
     helvetica.set('Subtype', new PDFName('Type1'));
     helvetica.set('BaseFont', new PDFName('Helvetica'));
+    helvetica.set('Encoding', new PDFName('WinAnsiEncoding'));
     fontDict.set('Helv', helvetica);
   }
 }
@@ -57,15 +59,23 @@ export async function insertInvisibleTextLayer(
   for (const w of words) {
     if (!w.text.trim()) continue;
     const fontSize = Math.max(4, Math.min(72, w.bbox.height * 0.9));
-    const escaped = serializeToString(new PDFString(w.text.slice(0, 200)));
+    // WinAnsi bytes (one per character), so accented words survive.
+    const text = encodeWinAnsi(w.text.slice(0, 200));
+    const escaped = serializeToString(new PDFString(text));
+    // Stretch the word over its box so search highlights and selection line up.
+    const natural = measureTextBoxString(w.text.slice(0, 200), 'Helvetica', fontSize);
+    const tz = natural > 0 && w.bbox.width > 0 ? Math.max(10, Math.min(1000, (w.bbox.width / natural) * 100)) : 100;
     parts.push(`/Helv ${fontSize.toFixed(2)} Tf`);
+    parts.push(`${tz.toFixed(2)} Tz`);
     parts.push(`1 0 0 1 ${w.bbox.x.toFixed(2)} ${w.bbox.y.toFixed(2)} Tm`);
     parts.push(`${escaped} Tj`);
   }
   parts.push('ET', 'Q\n');
 
   const existing = getPageContentBytes(page, doc.objects);
-  const injection = new TextEncoder().encode(parts.join('\n'));
-  const merged = concatBytes(existing, injection);
+  const joined = parts.join('\n');
+  const injection = new Uint8Array(joined.length);
+  for (let i = 0; i < joined.length; i++) injection[i] = joined.charCodeAt(i) & 0xff;
+  const merged = concatBytes(isolateGraphicsState(existing), injection);
   await updatePageContent(page.contentRefs, merged, doc.objects);
 }

@@ -1,14 +1,23 @@
 import React from 'react';
 import type { EditorTool } from '../types';
 import { TOOL_LABELS } from '../types';
-import type { TextRun, RenderResult, PDFDocumentData } from '@/engine';
+import type { RenderResult, PDFDocumentData } from '@/engine';
 
 interface StatusBarProps {
   renderResult: RenderResult | null;
   activeTool: EditorTool;
-  selectedRun: TextRun | null;
+  /** Full text of the selected line (all of its runs). */
+  selectedText: string | null;
   doc: PDFDocumentData | null;
   totalPages: number;
+}
+
+/** First `max` user-perceived characters, so a Devanagari syllable is never cut. */
+function preview(text: string, max: number): string {
+  const chars = typeof Intl !== 'undefined' && 'Segmenter' in Intl
+    ? Array.from(new Intl.Segmenter(undefined, { granularity: 'grapheme' }).segment(text), (s) => s.segment)
+    : Array.from(text);
+  return chars.length > max ? `${chars.slice(0, max).join('')}…` : text;
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -18,7 +27,7 @@ function plural(count: number, one: string, many: string): string {
 export function StatusBar({
   renderResult,
   activeTool,
-  selectedRun,
+  selectedText,
   doc,
   totalPages
 }: StatusBarProps) {
@@ -31,10 +40,10 @@ export function StatusBar({
       </span>
       <span className="text-[10px] font-medium tracking-wider text-app-faint flex items-center gap-2">
         <span>TOOL: <span className="text-app">{TOOL_LABELS[activeTool].toUpperCase()}</span></span>
-        {selectedRun && (
+        {selectedText && (
           <>
             <span className="w-1 h-1 rounded-full bg-[var(--border-strong)]" />
-            <span>SELECTED: <span className="text-app">&quot;{selectedRun.text.substring(0, 30)}{selectedRun.text.length > 30 ? '…' : ''}&quot;</span></span>
+            <span>SELECTED: <span className="text-app">&quot;{preview(selectedText, 30)}&quot;</span></span>
           </>
         )}
       </span>

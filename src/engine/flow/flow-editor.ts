@@ -27,6 +27,7 @@ import {
   visualFontSize,
 } from './metrics';
 import { detectTablesOnPage, findCellForLine } from './table-detect';
+import { buildClusterInventory, hasComplexScriptText, measureTextFromClusters } from '../editor/indic-cluster-encoder';
 import type { DocumentFlow, TextLine } from './types';
 
 /** Normalize bullets/dashes so "• " still matches rewritten "- ". */
@@ -423,12 +424,23 @@ export function applyLineTextEdit(
     }
   }
 
+  // Shaped (Indic) text is re-drawn from page glyph clusters with a known
+  // advance — use it instead of per-character estimates for the trailers.
+  let clusterInventory: ReturnType<typeof buildClusterInventory> | null = null;
+  const measureShaped = (text: string, run: TextRun): number | null => {
+    if (!hasComplexScriptText(text)) return null;
+    clusterInventory ??= buildClusterInventory(interpretPage(contentBytes, page, objects).textRuns);
+    const size = Math.abs(run.fontSize * (run.textMatrix?.d ?? 1)) || run.fontSize;
+    return measureTextFromClusters(text, clusterInventory, size);
+  };
+
   // Shifts must use the same caret-aware split as the text rewrite.
   const editShifts = primarySegmentEdits
     ? computeHorizontalShiftsFromEdits(
       primaryLine,
       primarySegmentEdits,
       options?.fontSizeOverrides,
+      measureShaped,
     )
     : plan.shifts;
 

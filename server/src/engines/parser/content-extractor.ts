@@ -14,7 +14,7 @@ import {
 import { resolve } from './document-parser.js';
 import { decodeStream } from './filters.js';
 import { PageSpatialIndex } from './spatial-index.js';
-import { decodeTextString, loadPageFonts, type LoadedFont } from './font-decode.js';
+import { decodePdfTextString, decodeTextString, loadPageFonts, type LoadedFont } from './font-decode.js';
 import type {
   ColorValue,
   PathCommand,
@@ -47,6 +47,22 @@ interface GraphicsState {
   textLineMatrix: Matrix2D;
   renderingMode: number;
   opacity: number;
+}
+
+/** An open marked-content sequence (BMC/BDC … EMC). */
+interface MarkedContent {
+  /** /ActualText replacing the glyphs painted inside the sequence (PDF 14.9.4). */
+  actualText: string | null;
+  /** Glyph boxes painted inside, in device space. */
+  boxes: Array<{ x: number; y: number; x2: number; y2: number }>;
+  /** Text state at the first glyph, for the replacement characters. */
+  state: GraphicsState | null;
+  tm: Matrix2D | null;
+}
+
+/** An inline dictionary operand (e.g. the property list of BDC). */
+class InlineDict {
+  constructor(readonly entries: Map<string, unknown>) {}
 }
 
 function defaultState(): GraphicsState {
@@ -102,7 +118,7 @@ export async function extractPageRaw(
   const xObjectMap = collectXObjects(page.resources, objects);
 
   const lexer = new PdfLexer(content);
-  const operands: Array<number | string | PdfName | Array<number | string>> = [];
+  const operands: Array<number | string | PdfName | InlineDict | Array<number | string>> = [];
 
   const flushPath = (paint: RawVector['paint']) => {
     if (path.length === 0) return;
@@ -136,8 +152,79 @@ export async function extractPageRaw(
   };
 
   const nextLine = () => {
-    gs.textLineMatrix = multiplyMatrix(gs.textLineMatrix, [1, 0, 0, 1, 0, -gs.leading]);
+    gs.textLineMatrix = multiplyMatrix([1, 0, 0, 1, 0, -gs.leading], gs.textLineMatrix);
     gs.textMatrix = gs.textLineMatrix;
+  };
+
+  const markedContent: MarkedContent[] = [];
+  const properties = collectProperties(page.resources, objects);
+  /** Outermost open ActualText sequence: it replaces everything painted inside it. */
+  const actualTextSpan = () => markedContent.find((m) => m.actualText !== null);
+
+  /** Emit an ActualText sequence's replacement text over the glyphs it covered. */
+  const emitActualText = (span: MarkedContent) => {
+    const text = [...(span.actualText ?? '')];
+    if (text.length === 0 || span.boxes.length === 0 || !span.state || !span.tm) return;
+    const minX = Math.min(...span.boxes.map((b) => b.x));
+    const minY = Math.min(...span.boxes.map((b) => b.y));
+    const maxX = Math.max(...span.boxes.map((b) => b.x2));
+    const maxY = Math.max(...span.boxes.map((b) => b.y2));
+    const st = span.state;
+    const runId = createId('textRun');
+    const charIds: string[] = [];
+    const step = (maxX - minX) / text.length;
+    text.forEach((ch, i) => {
+      const bbox = { x: minX + step * i, y: minY, width: step, height: maxY - minY };
+      const charId = createId('char');
+      const character: RawCharacter = {
+        id: charId,
+        type: 'character',
+        parentId: runId,
+        childIds: [],
+        pageIndex: page.index,
+        bbox,
+        transform: span.tm!,
+        zIndex: z++,
+        unicode: ch,
+        glyphId: ch.codePointAt(0) ?? 0,
+        width: bbox.width,
+        height: bbox.height,
+        rotation: Math.atan2(span.tm![1], span.tm![0]) * (180 / Math.PI),
+        fontName: st.fontName,
+        fontSize: st.fontSize,
+        fontWeight: /bold/i.test(st.fontName) ? 700 : 400,
+        italic: /italic|oblique/i.test(st.fontName),
+        fillColor: st.fillColor,
+        strokeColor: st.strokeColor,
+        characterSpacing: st.charSpacing,
+        wordSpacing: st.wordSpacing,
+        renderingMode: st.renderingMode,
+        writingDirection: 'ltr',
+      };
+      characters.push(character);
+      charIds.push(charId);
+      graph.add(character);
+      spatial.insert({ id: charId, type: 'character', bbox, zIndex: character.zIndex });
+    });
+    const runBBox = { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+    const run: RawTextRun = {
+      id: runId,
+      type: 'textRun',
+      parentId: pageId,
+      childIds: charIds,
+      pageIndex: page.index,
+      bbox: runBBox,
+      transform: span.tm,
+      zIndex: z++,
+      text: text.join(''),
+      fontName: st.fontName,
+      fontSize: st.fontSize,
+      characterIds: charIds,
+      fillColor: st.fillColor,
+    };
+    textRuns.push(run);
+    graph.add(run);
+    spatial.insert({ id: runId, type: 'textRun', bbox: runBBox, zIndex: run.zIndex });
   };
 
   const showText = (text: string) => {
@@ -145,6 +232,33 @@ export async function extractPageRaw(
     const font: LoadedFont | undefined = fontMap.get(gs.fontResource);
     const glyphs = decodeTextString(text, font);
     if (glyphs.length === 0) return;
+
+    // Inside an ActualText sequence the glyphs only move the pen and mark the
+    // area; the sequence's text is emitted at EMC (shaped scripts such as
+    // Devanagari carry their real text there, not in the font's ToUnicode).
+    const span = actualTextSpan();
+    if (span) {
+      for (const glyph of glyphs) {
+        const glyphWidth = (glyph.width1000 / 1000) * gs.fontSize;
+        let advance = glyphWidth + gs.charSpacing;
+        if (glyph.charCode === 32) advance += gs.wordSpacing;
+        const tm = multiplyMatrix(gs.textMatrix, gs.ctm);
+        const origin = transform(tm, 0, 0);
+        const tip = transform(tm, glyphWidth, gs.fontSize);
+        span.boxes.push({
+          x: Math.min(origin.x, tip.x),
+          y: Math.min(origin.y, tip.y),
+          x2: Math.max(origin.x, tip.x),
+          y2: Math.max(origin.y, tip.y),
+        });
+        if (!span.state) {
+          span.state = structuredClone(gs);
+          span.tm = tm;
+        }
+        gs.textMatrix = multiplyMatrix([1, 0, 0, 1, advance, 0], gs.textMatrix);
+      }
+      return;
+    }
 
     const runId = createId('textRun');
     const charIds: string[] = [];
@@ -156,7 +270,7 @@ export async function extractPageRaw(
       let advance = glyphWidth + gs.charSpacing;
       if (glyph.charCode === 32) advance += gs.wordSpacing;
 
-      const tm = multiplyMatrix(gs.ctm, gs.textMatrix);
+      const tm = multiplyMatrix(gs.textMatrix, gs.ctm);
       const origin = transform(tm, 0, 0);
       const tip = transform(tm, glyphWidth, fontSize);
       const bbox = {
@@ -200,8 +314,9 @@ export async function extractPageRaw(
         runText += ch;
       }
 
-      gs.textMatrix = multiplyMatrix(gs.textMatrix, [1, 0, 0, 1, advance, 0]);
+      gs.textMatrix = multiplyMatrix([1, 0, 0, 1, advance, 0], gs.textMatrix);
     }
+    if (charIds.length === 0) return; // only unmapped glyphs: nothing to read
 
     const runBBox = boundsOf(
       characters
@@ -225,7 +340,7 @@ export async function extractPageRaw(
       childIds: charIds,
       pageIndex: page.index,
       bbox: runBBox,
-      transform: multiplyMatrix(gs.ctm, gs.textMatrix),
+      transform: multiplyMatrix(gs.textMatrix, gs.ctm),
       zIndex: z++,
       text: runText,
       fontName: gs.fontName,
@@ -254,6 +369,10 @@ export async function extractPageRaw(
       operands.push(new PdfName(tok.value));
       continue;
     }
+    if (tok.kind === 'dictStart') {
+      operands.push(readInlineDict(lexer));
+      continue;
+    }
     if (tok.kind === 'arrayStart') {
       const arr: Array<number | string> = [];
       while (true) {
@@ -280,7 +399,8 @@ export async function extractPageRaw(
         break;
       case 'cm': {
         const [a, b, c, d, e, f] = nums(operands, 6);
-        gs.ctm = multiplyMatrix(gs.ctm, [a, b, c, d, e, f]);
+        // PDF 8.4.4: CTM' = M × CTM (the new matrix applies first).
+        gs.ctm = multiplyMatrix([a, b, c, d, e, f], gs.ctm);
         break;
       }
       case 'w':
@@ -385,14 +505,15 @@ export async function extractPageRaw(
         break;
       case 'Td': {
         const [tx, ty] = nums(operands, 2);
-        gs.textLineMatrix = multiplyMatrix(gs.textLineMatrix, [1, 0, 0, 1, tx, ty]);
+        // PDF 9.4.2: Tlm' = [1 0 0 1 tx ty] × Tlm (offsets are in text space).
+        gs.textLineMatrix = multiplyMatrix([1, 0, 0, 1, tx, ty], gs.textLineMatrix);
         gs.textMatrix = gs.textLineMatrix;
         break;
       }
       case 'TD': {
         const [tx, ty] = nums(operands, 2);
         gs.leading = -ty;
-        gs.textLineMatrix = multiplyMatrix(gs.textLineMatrix, [1, 0, 0, 1, tx, ty]);
+        gs.textLineMatrix = multiplyMatrix([1, 0, 0, 1, tx, ty], gs.textLineMatrix);
         gs.textMatrix = gs.textLineMatrix;
         break;
       }
@@ -450,10 +571,35 @@ export async function extractPageRaw(
               showText(item);
             } else if (typeof item === 'number') {
               const adjust = (-item / 1000) * gs.fontSize;
-              gs.textMatrix = multiplyMatrix(gs.textMatrix, [1, 0, 0, 1, adjust, 0]);
+              gs.textMatrix = multiplyMatrix([1, 0, 0, 1, adjust, 0], gs.textMatrix);
             }
           }
         }
+        break;
+      }
+      case 'BMC':
+        markedContent.push({ actualText: null, boxes: [], state: null, tm: null });
+        break;
+      case 'BDC': {
+        const props = operands[operands.length - 1];
+        let actual: unknown = null;
+        if (props instanceof InlineDict) actual = props.entries.get('ActualText');
+        else if (props instanceof PdfName) {
+          const dict = properties.get(props.value);
+          actual = dict?.get('ActualText') ?? null;
+        }
+        markedContent.push({
+          actualText: typeof actual === 'string' ? decodePdfTextString(actual) : null,
+          boxes: [],
+          state: null,
+          tm: null,
+        });
+        break;
+      }
+      case 'EMC': {
+        const span = markedContent.pop();
+        // Nested sequences inside an ActualText one are covered by the outer text.
+        if (span && span.actualText !== null && !actualTextSpan()) emitActualText(span);
         break;
       }
       case 'Do': {
@@ -480,6 +626,10 @@ export async function extractPageRaw(
     }
     operands.length = 0;
   }
+
+  // A sequence left open at the end of the stream still covers its glyphs.
+  const unclosed = actualTextSpan();
+  if (unclosed) emitActualText(unclosed);
 
   // Annotations / forms from page dict
   const annotations = extractAnnotations(page, objects, pageId, graph, spatial);
@@ -525,6 +675,53 @@ export async function extractPageRaw(
     fonts,
     spatialIndex: spatial,
   };
+}
+
+/** Read an inline `<< … >>` operand; nested dictionaries/arrays are skipped. */
+function readInlineDict(lexer: PdfLexer): InlineDict {
+  const entries = new Map<string, unknown>();
+  let key: string | null = null;
+  let depth = 0;
+  for (;;) {
+    const t = lexer.nextToken();
+    if (t.kind === 'eof') break;
+    if (t.kind === 'dictStart' || t.kind === 'arrayStart') {
+      depth++;
+      continue;
+    }
+    if (t.kind === 'dictEnd' || t.kind === 'arrayEnd') {
+      if (depth === 0) break;
+      depth--;
+      if (depth === 0) key = null;
+      continue;
+    }
+    if (depth > 0) continue;
+    if (key === null) {
+      if (t.kind === 'name') key = t.value;
+      continue;
+    }
+    if (t.kind === 'string' || t.kind === 'number') entries.set(key, t.value);
+    else if (t.kind === 'name') entries.set(key, new PdfName(t.value));
+    key = null;
+  }
+  return new InlineDict(entries);
+}
+
+/** Named marked-content property lists (/Resources /Properties). */
+function collectProperties(
+  resources: PdfDict | null,
+  objects: Map<string, PdfPrimitive>,
+): Map<string, PdfDict> {
+  const map = new Map<string, PdfDict>();
+  if (!resources) return map;
+  let props: PdfPrimitive = resources.get('Properties');
+  if (props instanceof PdfRef) props = resolve(objects, props);
+  if (!(props instanceof PdfDict)) return map;
+  for (const [name, value] of props.entries()) {
+    const obj = value instanceof PdfRef ? resolve(objects, value) : value;
+    if (obj instanceof PdfDict) map.set(name, obj);
+  }
+  return map;
 }
 
 function collectXObjects(

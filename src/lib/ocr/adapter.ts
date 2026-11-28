@@ -124,10 +124,11 @@ export function mapOcrWordsToPdf(
   scale: number,
   mediaBoxY = 0,
   dpr = 1,
+  mediaBoxX = 0,
 ): OcrWord[] {
   const s = scale * dpr;
   return words.map(w => {
-    const pdfX = w.bbox.x / s;
+    const pdfX = w.bbox.x / s + mediaBoxX;
     const pdfHeight = w.bbox.height / s;
     const topCss = w.bbox.y / s;
     const pdfY = pageHeight - topCss - pdfHeight + mediaBoxY;

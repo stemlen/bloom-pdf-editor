@@ -12,50 +12,72 @@ export function writeTable(table: LogicalTable): string {
     })
     .join('');
 
-  // Build occupancy grid for spans
-  const occupied = new Set<string>();
-  const rowsXml: string[] = [];
+  // Spans come from geometry and can overlap other cells (a wide title row
+  // "spanning" rows that hold cells of their own). Shrink each span so it
+  // never covers another cell; otherwise that cell's text is dropped.
+  const key = (r: number, c: number) => `${r},${c}`;
+  const cellAt = new Map(table.cells.map((cell) => [key(cell.rowIndex, cell.colIndex), cell]));
+  const owner = new Map<string, { row: number; colSpan: number }>();
+  const spans = new Map<(typeof table.cells)[number], { rowSpan: number; colSpan: number }>();
+  const ordered = [...table.cells].sort((a, b) => a.rowIndex - b.rowIndex || a.colIndex - b.colIndex);
+  for (const cell of ordered) {
+    const { rowIndex: r, colIndex: c } = cell;
+    if (owner.has(key(r, c))) continue;
+    const free = (rr: number, cc: number) => !cellAt.has(key(rr, cc)) && !owner.has(key(rr, cc));
+    let colSpan = 1;
+    while (colSpan < cell.colSpan && c + colSpan < colCount && free(r, c + colSpan)) colSpan++;
+    let rowSpan = 1;
+    while (
+      rowSpan < cell.rowSpan &&
+      r + rowSpan < table.rows.length &&
+      Array.from({ length: colSpan }, (_, i) => free(r + rowSpan, c + i)).every(Boolean)
+    ) {
+      rowSpan++;
+    }
+    spans.set(cell, { rowSpan, colSpan });
+    for (let rr = 0; rr < rowSpan; rr++) {
+      for (let cc = 0; cc < colSpan; cc++) {
+        if (rr || cc) owner.set(key(r + rr, c + cc), { row: r, colSpan });
+      }
+    }
+  }
 
+  const rowsXml: string[] = [];
   for (let r = 0; r < table.rows.length; r++) {
     const row = table.rows[r]!;
-    const cells = table.cells
-      .filter((c) => c.rowIndex === r)
-      .sort((a, b) => a.colIndex - b.colIndex);
-
     const tcs: string[] = [];
     for (let c = 0; c < colCount; c++) {
-      if (occupied.has(`${r},${c}`)) continue;
-      const cell = cells.find((x) => x.colIndex === c);
-      if (!cell) {
+      const covered = owner.get(key(r, c));
+      if (covered) {
+        // Below a vertical merge: a continuation cell keeps the row's grid intact.
+        if (covered.row < r) {
+          const width = Math.round(
+            table.columns.slice(c, c + covered.colSpan).reduce((sum, col) => sum + (col.width || 100), 0) * 15,
+          );
+          const gridSpan = covered.colSpan > 1 ? `<w:gridSpan w:val="${covered.colSpan}"/>` : '';
+          tcs.push(`<w:tc><w:tcPr>${gridSpan}<w:vMerge/><w:tcW w:w="${width}" w:type="dxa"/></w:tcPr><w:p/></w:tc>`);
+          c += covered.colSpan - 1;
+        }
+        continue;
+      }
+      const cell = cellAt.get(key(r, c));
+      const span = cell ? spans.get(cell) : undefined;
+      if (!cell || !span) {
         tcs.push('<w:tc><w:tcPr/><w:p/></w:tc>');
         continue;
       }
-      for (let rr = 0; rr < cell.rowSpan; rr++) {
-        for (let cc = 0; cc < cell.colSpan; cc++) {
-          if (rr || cc) occupied.add(`${r + rr},${c + cc}`);
-        }
-      }
       const tcPr: string[] = [];
-      if (cell.colSpan > 1) tcPr.push(`<w:gridSpan w:val="${cell.colSpan}"/>`);
-      if (cell.rowSpan > 1) tcPr.push('<w:vMerge w:val="restart"/>');
+      if (span.colSpan > 1) tcPr.push(`<w:gridSpan w:val="${span.colSpan}"/>`);
+      if (span.rowSpan > 1) tcPr.push('<w:vMerge w:val="restart"/>');
       const width = Math.round(
         table.columns
-          .slice(c, c + cell.colSpan)
+          .slice(c, c + span.colSpan)
           .reduce((s, col) => s + (col.width || 100), 0) * 15,
       );
       tcPr.push(`<w:tcW w:w="${width}" w:type="dxa"/>`);
       tcs.push(
         `<w:tc><w:tcPr>${tcPr.join('')}</w:tcPr>${paragraph(runText(cell.text || ' '))}</w:tc>`,
       );
-    }
-
-    // Continue vMerge for spanned rows is handled via occupied skip + empty vMerge cells
-    // Add continue markers for vertical merges starting above
-    for (const cell of table.cells) {
-      if (cell.rowSpan <= 1) continue;
-      if (r > cell.rowIndex && r < cell.rowIndex + cell.rowSpan) {
-        // already occupied — ensure we emitted vMerge continue; simplified: skip
-      }
     }
 
     const trPr =
